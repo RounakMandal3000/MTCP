@@ -26,36 +26,21 @@
 #define ENOBUFS 105  // No buffer space available error code
 #define ENOTBOUND 106 // Socket is not bound error code
 #define ENOMSG 107    // No message available error code
-
+#define EPROTONOSUPPORT 108 // Protocol not supported error code
 // ------------------- Message / ACK Formats -------------------
 
 
 // Message packet sent over unreliable channel
 typedef struct {
     uint16_t seq_num;               // 4-bit (wraps around after 15)
-    uint16_t length;                // number of bytes used (<= 1024)
-    char data[MTP_MSG_SIZE];        // payload
-    bool is_ack;                    // true if this is an ACK
+    uint16_t wnd_sz;
+    bool is_ack;                     // true if this is an ACK
+    int next_val;
+    char data[is_ack ? 0 : MTP_MSG_SIZE];        // payload
+    struct timespec sent_time;    
 } MTP_Message;
 
-// Acknowledgement packet
-typedef struct {
-    uint16_t ack_num;               // last in-order seq received
-    uint16_t rwnd;                  // free buffer slots available at receiver
-    bool is_ack;                    // true if this is an ACK
-} MTP_Ack;
-
-
 // ------------------- Receiver/Sender State -------------------
-
-typedef struct{
-    int seq_num;
-    struct timespec sent_time;
-} sender_window_entry;
-
-typedef struct{
-    int seq_num;
-} receiver_window_entry;
 
 typedef struct RecvNode {
     MTP_Message msg;
@@ -70,27 +55,61 @@ typedef struct {
 
 typedef struct {
     MTP_Queue buffer;   // receiver buffer (out-of-order storage)
-    bool occupied[RECV_BUFFER];        // marks if buffer slot is filled
-    int rwnd_start;                 // base of the receiver window
-    int expected_seq;               // next expected in-order seq
-    receiver_window_entry rwnd[RECV_SWND];
+    int next_val;
+    int rwnd_count;                 // number of entries in receiver window
 } MTP_Receiver;
 
 typedef struct {
-    MTP_Queue buffer; // sender buffer (window of unacked msgs)
-    int swnd_start;                  // base of the sender window
-    int swnd_end;                    // next free slot for sending
-    int next_seq;                   // sequence number for next message
-    sender_window_entry swnd[SENDER_SWND];
+    MTP_Queue buffer;   // sender buffer (window of unacked msgs)
+    MTP_Message swnd[SENDER_SWND];
     int swnd_count;                 // number of entries in sender window
 } MTP_Sender;
 
 // ------------------- Socket State -------------------
+
+
+
+/**
+ * @struct MTP_socket
+ * @brief Represents a minimal transport protocol (MTP) socket.
+ * 
+ * @var udp_sockfd
+ * File descriptor for the underlying UDP socket.
+ */
+
+/**
+ * @struct MTP_SM_entry
+ * @brief Represents an entry in the MTP socket management table.
+ * 
+ * @var lock
+ * Mutex lock to ensure thread-safe access to the socket entry.
+ * 
+ * @var sock
+ * Pointer to the associated MTP_socket structure.
+ * 
+ * @var free_slot
+ * Static boolean flag indicating whether this entry is available for use.
+ * 
+ * @var pid_creation
+ * Process ID of the process that created this socket entry.
+ * 
+ * @var dest_addr
+ * Destination address (IP and port) for the socket.
+ * 
+ * @var src_addr
+ * Source address (IP and port) for the socket.
+ * 
+ * @var sender
+ * Pointer to the MTP_Sender structure for managing outgoing data.
+ * 
+ * @var receiver
+ * Pointer to the MTP_Receiver structure for managing incoming data.
+ * 
+ * @note Review this part of the code to ensure proper handling of the static 
+ *       `free_slot` variable and its implications in a multi-threaded environment.
+ */
 typedef struct{
     int udp_sockfd;
-    struct sockaddr_in src_addr;    // Source IP + port
-    struct sockaddr_in dest_addr;   // Destination IP + port
-    MTP_SM *mtp_sm;
 } MTP_socket;
 
 typedef struct{
@@ -98,20 +117,22 @@ typedef struct{
     MTP_socket *sock;
     bool free_slot;
     pid_t pid_creation; // PID of the process that created this socket
-    int udp_sockfd; 
-    struct sockaddr_in dest_addr;   // Destination IP + port
+    struct sockaddr_in dest_addr;   // Destination IP + portbut 
+    struct sockaddr_in src_addr;    // Source IP + port
     MTP_Sender *sender;
     MTP_Receiver *receiver;
 } MTP_SM_entry;
 
+
+
 typedef struct{
+    pthread_mutex_t lock_sm;
     MTP_SM_entry sm_entry[MAX_SOCKETS];
-    int any_free;
+    int count_occupied;
 } MTP_SM;
 
-MTP_SM sm;
 // ------------------- API Functions -------------------
-
+MTP_SM* finder(int shmid);
 int m_socket(int domain, int type, int protocol);
 int m_bind(int sockfd, struct sockaddr *my_addr, int addrlen);
 int m_sendto(int sockfd, const void *msg, int len, unsigned int flags, const struct sockaddr *to, socklen_t tolen);
@@ -123,5 +144,59 @@ int enqueue_recv(MTP_Queue *q, MTP_Message msg);
 int dequeue_recv(MTP_Queue *q, MTP_Message *msg);
 int is_empty(MTP_Queue *q);
 int is_full(MTP_Queue *q);
+void traverse_recv(MTP_Queue *q);
 
 #endif // M_SOCKET_H
+
+
+
+
+//  // Processing for Acknowledgment
+//                         MTP_Message *ack_back = malloc(sizeof(MTP_Message));
+//                         initializer_message(ack_back, true);
+//                         int cnt = 0;
+//                         for(int j=0; j < g_sm->sm_entry[i].receiver->rwnd_count; j++) {
+//                             if (g_sm->sm_entry[i].receiver->rwnd[j].seq_num == buf->seq_num) {
+//                                 cnt = -1;
+//                                 break;
+//                             }
+//                         }
+                        
+
+//                         if(cnt!=-1){        //NOT DUPLICATE MESSAGE
+//                             g_sm->sm_entry[i].receiver->rwnd_count++;
+//                             g_sm->sm_entry[i].receiver->rwnd[g_sm->sm_entry[i].receiver->rwnd_count].seq_num = buf->seq_num;
+//                             g_sm->sm_entry[i].receiver->rwnd_count++;
+//                             int j_ = g_sm->sm_entry[i].receiver->rwnd_count - 1;
+//                             for(int j=g_sm->sm_entry[i].receiver->rwnd_count-2; j >= 0; j--) {
+//                                 if (g_sm->sm_entry[i].receiver->rwnd[j].seq_num > buf->seq_num) {
+//                                     swap(g_sm->sm_entry[i].receiver->rwnd[j], g_sm->sm_entry[i].receiver->rwnd[j+1]);
+//                                     j_ = j;
+//                                 }
+//                             }
+//                             if(j_==0 || g_sm->sm_entry[i].receiver->rwnd[j_] == g_sm->sm_entry[i].receiver->rwnd[j_-1]) cnt = 1;
+//                         } 
+//                         else{              //DUPLICATE MESSAGE
+
+//                         }
+//                         ack_back.is_ack = true;
+//                         if(cnt > 0)  ack_back.seq_num = buf->seq_num;
+//                         else{
+//                             ack_back.seq_num = 0;
+//                             for(int j=1;j<g_sm->sm_entry[i].receiver->rwnd_count;j++){
+//                                 if(g_sm->sm_entry[i].receiver->rwnd[j].seq_num == g_sm->sm_entry[i].receiver->rwnd[j-1].seq_num + 1) ack_back.seq_num = g_sm->sm_entry[i].receiver->rwnd[j].seq_num;
+//                                 else break;
+//                             }
+//                         }
+//                         ack_back.wnd_sz = g_sm->sm_entry[i].receiver->rwnd_count;
+//                         pthread_mutex_unlock(&g_sm->sm_entry[i].lock);
+//                         int m = m_sendto(g_sm->sm_entry[i].sock->udp_sockfd, &ack_back, sizeof(MTP_Message), 0, (struct sockaddr *)&g_sm->sm_entry[i].sock->dest_addr, sizeof(g_sm->sm_entry[i].sock->dest_addr));
+//                         pthread_mutex_lock(&g_sm->sm_entry[i].lock);
+//                         if (m < 0) {
+//                             perror("sendto failed");
+//                             pthread_mutex_unlock(&g_sm->sm_entry[i].lock);
+//                             continue;
+//                         }
+
+//                         pthread_mutex_unlock(&g_sm->sm_entry[i].lock);
+//                         printf("Received packet from %s:%d\n", inet_ntoa(from.sin_addr), ntohs(from.sin_port));
