@@ -17,9 +17,13 @@
 #include <sys/shm.h>
 #include <pthread.h>
 
+Node* get_node(void *base, int offset) {
+    if (offset == -1) return NULL;
+    return (Node*)((char*)base + offset);
+}
 
 MTP_SM* finder(int shmid){
-    shmid = shmget(SHM_KEY, sizeof(MTP_SM), 0666);
+    shmid = shmget(SHM_KEY, sizeof(MTP_SM), 0777);
 
     MTP_SM *g_sm = (MTP_SM *)shmat(shmid, NULL, 0);
     if (g_sm == (MTP_SM *)-1) {
@@ -104,12 +108,13 @@ int m_sendto(int sockfd, const void *msg, int len, unsigned int flags, const str
     for(int i=0; i<MAX_SOCKETS; i++){
         pthread_mutex_lock(&sm->sm_entry[i].lock);
         if(memcmp(&sm->sm_entry[i].dest_addr, to, sizeof(struct sockaddr)) == 0){
-            if (is_full(&sm->sm_entry[i].sender.buffer)) {
+            if (is_full(i, 0)) {
                 errno = ENOBUFS;
                 pthread_mutex_unlock(&sm->sm_entry[i].lock);
                 return -1;
             }
-            int rv = enqueue_recv(&sm->sm_entry[i].sender.buffer, *(MTP_Message *)msg);
+
+            int rv = enqueue_recv(i, *(MTP_Message *)msg, 0);
             if (rv < 0) {
                 errno = ENOBUFS;
                 pthread_mutex_unlock(&sm->sm_entry[i].lock);
@@ -131,12 +136,12 @@ int m_recvfrom(int sockfd, void *buf, int len, unsigned int flags, struct sockad
     for(int i=0;i<MAX_SOCKETS; i++){
         pthread_mutex_lock(&sm->sm_entry[i].lock);
         if(memcmp(&sm->sm_entry[i].dest_addr, from, sizeof(struct sockaddr)) == 0){
-            if (is_empty(&sm->sm_entry[i].receiver.buffer)) {
+            if (is_empty(i, 1)) {
                 errno = ENOMSG;
                 pthread_mutex_unlock(&sm->sm_entry[i].lock);
                 return -1;
             }
-            int rv = dequeue_recv(&sm->sm_entry[i].receiver.buffer, (MTP_Message *)buf);   // buf now stores the message
+            int rv = dequeue_recv(i, (MTP_Message *)buf, 1);   // buf now stores the message
             if (rv < 0) {
                 errno = ENOBUFS;
                 pthread_mutex_unlock(&sm->sm_entry[i].lock);
@@ -178,10 +183,10 @@ int m_close(int sockfd) {
     sm->sm_entry[i].pid_creation = -1;
     sm->sm_entry[i].src_addr = (struct sockaddr){0};
     sm->sm_entry[i].dest_addr = (struct sockaddr){0};
-    init_recv_queue(&sm->sm_entry[i].sender.buffer);
+    init_recv_queue(i, 0);
     sm->sm_entry[i].sender.swnd_count = 0;
     memset(sm->sm_entry[i].sender.swnd, 0, sizeof(sm->sm_entry[i].sender.swnd));
-    init_recv_queue(&sm->sm_entry[i].receiver.buffer);
+    init_recv_queue(i, 1);
     sm->sm_entry[i].receiver.rwnd_count = 0;
     sm->sm_entry[i].receiver.next_val = 1;
     pthread_mutex_unlock(&sm->sm_entry[i].lock);
@@ -197,26 +202,51 @@ int dropMessage(float p){
         return 0; // Message not dropped
 }
 
-void init_recv_queue(MTP_Queue *q) {
+void init_recv_queue(int socket_id, int flag) {
+    MTP_SM *g_sm = finder(SHM_KEY);
+    if (g_sm == NULL) {
+        perror("Failed to find shared memory");
+        return;
+    }
+    MTP_Queue *q;
+    if(flag==1)
+        q = &g_sm->sm_entry[socket_id].receiver.buffer;
+    else
+        q = &g_sm->sm_entry[socket_id].sender.buffer;
     q->front = NULL;
     q->rear = NULL;
     q->count = 0;
 }
 
-int enqueue_recv(MTP_Queue *q, MTP_Message msg) {
+
+int enqueue_recv(int socket_id, MTP_Message msg, int flag) {
+    MTP_SM *g_sm = finder(SHM_KEY);
+    printf("%p ajfa;lksfjlkafjslfj\n", (void *)g_sm);
+    if (g_sm == NULL) {
+        perror("Failed to find shared memory");
+        return -1;
+    }
+    MTP_Queue *q;
+    if(flag==1)
+        q = &g_sm->sm_entry[socket_id].receiver.buffer;
+    else
+        q = &g_sm->sm_entry[socket_id].sender.buffer;
+    // printf("%p from enqueue_recv\n", (void *)q);
     Node *new_node = (Node*)malloc(sizeof(Node));
     if (!new_node) return -1;  // malloc failed
-    if (is_full(q)) {
+    if (is_full(socket_id, flag)) {
         free(new_node);
         return -1;  // queue is full
     }
 
     new_node->msg = msg;   // copy message
+    
     new_node->next = NULL;
 
     if (q->rear == NULL) {
         // empty queue
-        q->front = q->rear = new_node;
+        q->front = new_node;
+        q->rear = new_node;
     } else {
         q->rear->next = new_node;
         q->rear = new_node;
@@ -226,17 +256,31 @@ int enqueue_recv(MTP_Queue *q, MTP_Message msg) {
     return 0;  // success
 }
 
-int dequeue_recv(MTP_Queue *q, MTP_Message *msg) {
+int dequeue_recv(int socket_id, MTP_Message *msg, int flag) {
+    MTP_SM *g_sm = finder(SHM_KEY);
+    printf("%p \n", (void *)g_sm);
+    if (g_sm == NULL) {
+        perror("Failed to find shared memory");
+        return -1;
+    }
+    MTP_Queue *q;
+    if(flag==1)
+        q = &g_sm->sm_entry[socket_id].receiver.buffer;
+    else
+        q = &g_sm->sm_entry[socket_id].sender.buffer;
+    printf("%p from enqueue_recv\n", (void *)q);
+    printf("Dequeuing message from receiver buffer\n");
     if (q->front == NULL) {
-        return -1;  // empty queue
+        // Queue is empty
+        return -1;
     }
 
     Node *temp = q->front;
-    *msg = temp->msg;  // return message
+    *msg = temp->msg;   // copy message to caller
 
     q->front = q->front->next;
     if (q->front == NULL) {
-        // queue became empty
+        // Queue became empty
         q->rear = NULL;
     }
 
@@ -245,75 +289,34 @@ int dequeue_recv(MTP_Queue *q, MTP_Message *msg) {
     return 0;  // success
 }
 
-int is_empty(MTP_Queue *q) {
+
+int is_empty(int socket_id, int flag) {
+    MTP_SM *g_sm = finder(SHM_KEY);
+    if (g_sm == NULL) {
+        perror("Failed to find shared memory");
+        return -1;
+    }
+    MTP_Queue *q;
+    if(flag==1)
+        q = &g_sm->sm_entry[socket_id].receiver.buffer;
+    else
+        q = &g_sm->sm_entry[socket_id].sender.buffer;
     return q->count == 0;
 }
 
-int is_full(MTP_Queue *q) {
+int is_full(int socket_id, int flag) {
+    MTP_SM *g_sm = finder(SHM_KEY);
+    if (g_sm == NULL) {
+        perror("Failed to find shared memory");
+        return -1;
+    }
+    MTP_Queue *q;
+    if(flag==1)
+        q = &g_sm->sm_entry[socket_id].receiver.buffer;
+    else
+        q = &g_sm->sm_entry[socket_id].sender.buffer;
     return q->count == RECV_BUFFER;
 }
-
-void traverse_recv(MTP_Queue *q) {
-    if (q->front == NULL) {
-        printf("Queue is empty\n");
-        return;
-    }
-
-    Node *current = q->front;
-    // printf("Queue contents (count=%d):\n", q->count);
-
-    while (current != NULL) {
-        // Print message details (adapt as per your MTP_Message struct)
-        // printf("Message: [id=%d, size=%d]\n", current->msg.id, current->msg.size);
-        
-        current = current->next;
-    }
-}
-
-
-// // Initialize the queue
-// void initQueue_pid(PIDQueue *q) {
-//     q->front = NULL;
-//     q->rear = NULL;
-//     q->size = 0;
-// }
-
-// // Check if queue is empty
-// int is_Empty_pid(PIDQueue *q) {
-//     return q->front == NULL;
-// }
-
-// // Enqueue
-// void enqueue_pid(PIDQueue *q, pid_t pid, char *filename) {
-//     Node_pid *newNode = malloc(sizeof(Node_pid));
-//     newNode->pid = pid;
-//     newNode->filename = filename;
-//     newNode->next = NULL;
-//     newNode->prev = q->rear;
-
-//     if (q->rear) q->rear->next = newNode;
-//     q->rear = newNode;
-//     if (!q->front) q->front = newNode;
-
-//     q->size++;
-// }
-
-// // Dequeue
-// Node_pid dequeue_pid(PIDQueue *q) {
-//     if (is_Empty_pid(q)) return (Node_pid){-1, NULL, NULL, NULL};  // or handle error
-
-//     Node_pid *tmp = q->front;
-//     pid_t pid = tmp->pid;
-
-//     q->front = tmp->next;
-//     if (q->front) q->front->prev = NULL;
-//     else q->rear = NULL;  // queue is now empty
-
-//     free(tmp);
-//     q->size--;
-
-//     return (Node_pid){pid, tmp->filename, NULL, NULL};
-// }
 
 void* file_to_sender_thread(void* arg) {
     int sockfd = *(int *)arg;
@@ -358,7 +361,8 @@ void* file_to_sender_thread(void* arg) {
             // struct timespec now;
             // clock_gettime(CLOCK_MONOTONIC, &now);
             // msg.sent_time = now;
-            int rv = enqueue_recv(&(sender.buffer), msg);
+            int rv = enqueue_recv(j_, msg, 0);
+            
             if (rv < 0) {
                 perror("Failed to enqueue message");
                 pthread_mutex_unlock(&g_sm->sm_entry[j_].lock);

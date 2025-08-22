@@ -22,7 +22,7 @@
 #define TIME_SEC 5              // Timeout duration in seconds
 #define TIME_USEC 0             // Timeout duration in microseconds
 
-#define SHM_KEY 0x1334           // Shared memory key for inter-process communication
+#define SHM_KEY 0x1324           // Shared memory key for inter-process communication
 
 #define ENOBUFS 105  // No buffer space available error code
 #define ENOTBOUND 106 // Socket is not bound error code
@@ -72,46 +72,6 @@ typedef struct {
 // ------------------- Socket State -------------------
 
 
-
-/**
- * @struct MTP_socket
- * @brief Represents a minimal transport protocol (MTP) socket.
- * 
- * @var udp_sockfd
- * File descriptor for the underlying UDP socket.
- */
-
-/**
- * @struct MTP_SM_entry
- * @brief Represents an entry in the MTP socket management table.
- * 
- * @var lock
- * Mutex lock to ensure thread-safe access to the socket entry.
- * 
- * @var sock
- * Pointer to the associated MTP_socket structure.
- * 
- * @var free_slot
- * Static boolean flag indicating whether this entry is available for use.
- * 
- * @var pid_creation
- * Process ID of the process that created this socket entry.
- * 
- * @var dest_addr
- * Destination address (IP and port) for the socket.
- * 
- * @var src_addr
- * Source address (IP and port) for the socket.
- * 
- * @var sender
- * Pointer to the MTP_Sender structure for managing outgoing data.
- * 
- * @var receiver
- * Pointer to the MTP_Receiver structure for managing incoming data.
- * 
- * @note Review this part of the code to ensure proper handling of the static 
- *       `free_slot` variable and its implications in a multi-threaded environment.
- */
 typedef struct{
     int udp_sockfd;
 } MTP_socket;
@@ -156,14 +116,18 @@ int m_sendto(int sockfd, const void *msg, int len, unsigned int flags, const str
 int m_recvfrom(int sockfd, void *buf, int len, unsigned int flags, struct sockaddr *from, int *fromlen);
 int m_close(int sockfd);
 int dropMessage(float p);
-void init_recv_queue(MTP_Queue *q);
-int enqueue_recv(MTP_Queue *q, MTP_Message msg);
-int dequeue_recv(MTP_Queue *q, MTP_Message *msg);
-int is_empty(MTP_Queue *q);
-int is_full(MTP_Queue *q);
-void traverse_recv(MTP_Queue *q);
+void init_recv_queue(int socket_id, int flag);
+int enqueue_recv(int socket_id, MTP_Message msg, int flag);
+int dequeue_recv(int socket_id, MTP_Message *msg, int flag);
+int is_empty(int socket_id, int flag);
+int is_full(int socket_id, int flag);
 void* file_to_sender_thread(void* arg);
 void* receiver_to_file_thread(void* arg);
+int is_empty_buffer(int socket_id, int flag);
+int is_full_buffer(int socket_id, int flag);
+int get_buffer_size(int socket_id, int flag);
+int remove_from_buffer(int socket_id, MTP_Message *msg, int flag);
+int add_to_buffer(int socket_id, MTP_Message *msg, int flag);
 // void initQueue_pid(PIDQueue *q);
 // int is_Empty_pid(PIDQueue *q);
 // void enqueue_pid(PIDQueue *q, pid_t pid, char* filename);
