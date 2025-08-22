@@ -32,7 +32,7 @@ void initializer_message(MTP_Message* msg, bool is_ack){
     msg->wnd_sz = -1; // if you use a bool
     msg->is_ack = is_ack;
     msg->next_val = -1;
-    msg->data = malloc(MTP_MSG_SIZE);
+    memset(msg->data, 0, sizeof(msg->data));
     msg->sent_time = default_time;
 }
 
@@ -53,6 +53,9 @@ int main(){
     }
     g_sm->count_occupied = 0;
     g_sm->lock_sm = (pthread_mutex_t)PTHREAD_MUTEX_INITIALIZER;
+    for (int i = 0; i < MAX_NODES; i++) {
+        g_sm->node_pool[i].used = 0;
+    }
     // initQueue_pid(&g_sm->.pid_queue);
 
     // g_sm->sm_entry = malloc(sizeof(MTP_SM_entry) * MAX_SOCKETS);
@@ -77,7 +80,7 @@ int main(){
             g_sm->sm_entry[i].sender.swnd[j].wnd_sz = -1; // if you use a bool
             g_sm->sm_entry[i].sender.swnd[j].is_ack = false;
             g_sm->sm_entry[i].sender.swnd[j].next_val = -1;
-            g_sm->sm_entry[i].sender.swnd[j].data = malloc(MTP_MSG_SIZE);
+            memset(g_sm->sm_entry[i].sender.swnd[j].data, 0, sizeof(g_sm->sm_entry[i].sender.swnd[j].data));
             g_sm->sm_entry[i].sender.swnd[j].sent_time = default_time;
         }
 
@@ -139,6 +142,7 @@ int socket_function(){
 void* receiver_thread(void *arg) {
     printf("Receiver thread started\n");
     MTP_SM *g_sm = finder(SHM_KEY);
+    void *base = base_finder(SHM_KEY);
     if (g_sm == NULL) {
         perror("Failed to find shared memory");
         return NULL;
@@ -215,53 +219,63 @@ void* receiver_thread(void *arg) {
                         initializer_message(ack_back, true);
                         int cnt = 0;
                         if(!is_empty(i, 1)){
-                            Node *current = g_sm->sm_entry[i].receiver.buffer.front;
+                            Node *current = get_node(base, g_sm->sm_entry[i].receiver.buffer.front);
                             while (current != NULL) {
                                 if (current->msg.seq_num == buf->seq_num) {
                                     cnt = -1;
                                     break;
                                 }
-                                current = current->next;
+                                // current = current->next;
+                                if (current->next == 0)
+                                    current = NULL;
+                                else
+                                    current = get_node(base, current->next);    
                             }
                         }
                         if(cnt==0){             //NOT DUPLICATE
                             if(!is_full(i, 1)){
                                 ack_back->seq_num = buf->seq_num;
                                 MTP_Queue *q = &g_sm->sm_entry[i].receiver.buffer;
-                                Node* current = q->front;
+                                Node* current = get_node(base, q->front);
                                 if(q->count == 0)
                                     enqueue_recv(i, *ack_back, 1);
                                 else{
                                     if(current->msg.seq_num > buf->seq_num){
                                         Node *temp = (Node*)malloc(sizeof(Node));
                                         temp->msg = *ack_back;
-                                        temp->next = current;
-                                        q->front = temp;
+                                        temp->next = OFFSET(base, current);
+                                        q->front = OFFSET(base, temp);
                                         q->count++;
                                     }
                                     else{
-                                        while (current->next != NULL && current != NULL) {
-                                            if(current->msg.seq_num < buf->seq_num && current->next->msg.seq_num > buf->seq_num){
+                                        while (current->next != 0 && current != 0) {
+                                            if(current->msg.seq_num < buf->seq_num && get_node(base, current->next)->msg.seq_num > buf->seq_num){
                                                 Node *temp = (Node*)malloc(sizeof(Node));
                                                 temp->msg = *ack_back;
                                                 temp->next = current->next;
-                                                current->next = temp;
+                                                current->next = OFFSET(base, temp);
                                                 q->count++;
                                                 break;
                                             }
-                                            current = current->next;
+                                            if (current->next == 0)
+                                                current = NULL;
+                                            else
+                                                current = get_node(base, current->next);
                                         }
                                     }                                    
                                 }
-                                current = q->front;
-                                while (current->next!=NULL && current != NULL) {
-                                    if (current->next->msg.seq_num != current->msg.seq_num + 1) {
+                                current = get_node(base, q->front);
+                                while (current->next!=0 && current != 0) {
+                                    if (get_node(base, current->next)->msg.seq_num != current->msg.seq_num + 1) {
                                         break;
                                     }
-                                    current = current->next;
+                                    if (current->next == 0)
+                                        current = NULL;
+                                    else
+                                        current = get_node(base, current->next);
                                 }
                                 ack_back->wnd_sz = q->count;
-                                ack_back->next_val = (current->next->msg.seq_num + 1)%MAX_SEQ_NUM;
+                                ack_back->next_val = (get_node(base, current->next)->msg.seq_num + 1)%MAX_SEQ_NUM;
 
                             }
                         }
@@ -269,14 +283,14 @@ void* receiver_thread(void *arg) {
                             MTP_Queue *q = &g_sm->sm_entry[i].receiver.buffer;
                             ack_back->seq_num = buf->seq_num;
                             ack_back->wnd_sz = q->count;
-                            Node *current = q->front;
-                            while (current->next!=NULL && current != NULL) {
-                                if (current->next->msg.seq_num != current->msg.seq_num + 1) {
+                            Node *current = get_node(base, q->front);
+                            while (current->next!=0 && current != 0) {
+                                if (get_node(base, current->next)->msg.seq_num != current->msg.seq_num + 1) {
                                     break;
                                 }
-                                current = current->next;
+                                current = get_node(base, current->next);
                             }
-                            ack_back->next_val = (current->next->msg.seq_num + 1)%MAX_SEQ_NUM;
+                            ack_back->next_val = (get_node(base, current->next)->msg.seq_num + 1)%MAX_SEQ_NUM;
                         }
                         int mn = sendto(g_sm->sm_entry[i].sock.udp_sockfd, ack_back, sizeof(MTP_Message), 0, (struct sockaddr *)&g_sm->sm_entry[i].dest_addr, sizeof(g_sm->sm_entry[i].dest_addr));
                         if (mn < 0) {
@@ -351,7 +365,7 @@ void* sender_thread(void *arg) {
                 // Retransmit packet
                 for (int j=0; j<SENDER_SWND; j++) {
                     if (sender->swnd[j].sent_time.tv_sec  != default_time.tv_sec || sender->swnd[j].sent_time.tv_nsec != default_time.tv_nsec) {
-                        printf("Retransmitting packet %d\n", sender->swnd[j].seq_num);
+                        printf("Retransmitting packet %d %s\n", sender->swnd[j].seq_num, sender->swnd[j].data);
                         sendto(g_sm->sm_entry[i].sock.udp_sockfd, &sender->swnd[j], sizeof(MTP_Message), 0, (struct sockaddr *)&g_sm->sm_entry[i].dest_addr, sizeof(g_sm->sm_entry[i].dest_addr));
                         sender->swnd[j].sent_time = now; // Update sent time
                     }
@@ -364,33 +378,23 @@ void* sender_thread(void *arg) {
                 pthread_mutex_lock(&g_sm->sm_entry[i].lock);
                 // printf("COUNT FOR THIS%d \n", g_sm->sm_entry[i].sender.buffer.front->msg.seq_num);
                 if((sender->swnd[j].sent_time.tv_sec  == default_time.tv_sec && sender->swnd[j].sent_time.tv_nsec == default_time.tv_nsec)){
-                    MTP_Message *buf = (MTP_Message *)malloc(sizeof(MTP_Message));
-                    
-                    if (!buf) {
-                        perror("Failed to allocate memory");
-                        pthread_mutex_unlock(&g_sm->sm_entry[i].lock);
-                        continue;
-                    }
-
-                    int rv = dequeue_recv(i, buf, 0);
+                    MTP_Message buf;
+                    memset(&buf, 0, sizeof(buf));
+                    int rv = dequeue_recv(i, &buf, 0);
+                    printf("%d\n", buf.seq_num);
                     if (rv < 0) {
                         perror("Failed to dequeue message");
                         pthread_mutex_unlock(&g_sm->sm_entry[i].lock);
                         continue;
                     }
-                    printf("4 \n");
-                    buf->sent_time = now;
-                    printf("5 \n");
+                    buf.sent_time = now;
 
-                    sender->swnd[j] = *buf;
-                    printf("6 \n");
+                    sender->swnd[j] = buf;
 
                     sender->swnd_count++;
-                    printf("7 \n");
 
                     // printf("Sending new packet %d\n", sender->next_seq);
                     sendto(g_sm->sm_entry[i].sock.udp_sockfd, &sender->swnd[j], sizeof(MTP_Message), 0, (struct sockaddr *)&g_sm->sm_entry[i].dest_addr, sizeof(g_sm->sm_entry[i].dest_addr));
-                    printf("8 \n");
 
                 }
                 j++;

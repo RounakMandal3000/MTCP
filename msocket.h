@@ -21,71 +21,82 @@
 #define DROP_PROB 0.5           // Packet drop probability
 #define TIME_SEC 5              // Timeout duration in seconds
 #define TIME_USEC 0             // Timeout duration in microseconds
-
-#define SHM_KEY 0x1324           // Shared memory key for inter-process communication
+#define MAX_NODES 50
+#define SHM_KEY 0x2425           // Shared memory key for inter-process communication
 
 #define ENOBUFS 105  // No buffer space available error code
 #define ENOTBOUND 106 // Socket is not bound error code
 #define ENOMSG 107    // No message available error code
 #define EPROTONOSUPPORT 108 // Protocol not supported error code
 
+// Convert offset <-> pointer relative to base
+#define OFFSET(base, ptr)   ((ptr) ? (size_t)((char*)(ptr) - (char*)(base)) : 0)
+#define PTR(base, offset)   ((offset) ? (void*)((char*)(base) + (offset)) : NULL)
 
 
 // ------------------- Message / ACK Formats -------------------
 
 
-// Message packet sent over unreliable channel
 typedef struct {
     uint16_t seq_num;               // 4-bit (wraps around after 15)
     uint16_t wnd_sz;
     bool is_ack;                     // true if this is an ACK
     int next_val;
-    char *data;        // payload, fix later
+    char data[MTP_MSG_SIZE];        // payload, fix later
     struct timespec sent_time;    
 } MTP_Message;
 
 // ------------------- Receiver/Sender State -------------------
-
-typedef struct RecvNode {
-    MTP_Message msg;
-    struct RecvNode *next;
-} Node;
-
-typedef struct {
-    Node *front;  // head of queue
-    Node *rear;   // tail of queue
-    int count;       // number of elements
-} MTP_Queue;
-
-typedef struct {
-    MTP_Queue buffer;   // receiver buffer (out-of-order storage)
-    int next_val;
-    int rwnd_count;                 // number of entries in receiver window
-} MTP_Receiver;
-
-typedef struct {
-    MTP_Queue buffer;   // sender buffer (window of unacked msgs)
-    MTP_Message swnd[SENDER_SWND];
-    int swnd_count;                 // number of entries in sender window
-} MTP_Sender;
-
-// ------------------- Socket State -------------------
-
-
-typedef struct{
-    int udp_sockfd;
-} MTP_socket;
-
 typedef struct{
     pid_t pid;
     char *filename;
 } Node_pid;
-
 typedef struct {
     Node_pid *front;   // points to the first element
     Node_pid *rear;    // points to the last element
     int size;          // optional, tracks number of elements
 } PIDQueue;
+
+
+// typedef struct RecvNode {
+//     MTP_Message msg;
+//     struct RecvNode *next;
+// } Node;
+typedef struct RecvNode {
+    MTP_Message msg;
+    size_t next;   
+} Node;
+
+typedef struct {
+    int used;
+    Node node;
+} NodeSlot;
+// typedef struct {
+//     Node *front;  // head of queue
+//     Node *rear;   // tail of queue
+//     int count;       // number of elements
+// } MTP_Queue;
+typedef struct {
+    size_t front;  
+    size_t rear;   
+    int count;         
+} MTP_Queue;
+
+typedef struct {
+    MTP_Queue buffer;   
+    int next_val;
+    int rwnd_count;                
+} MTP_Receiver;
+
+typedef struct {
+    MTP_Queue buffer;  
+    MTP_Message swnd[SENDER_SWND];
+    int swnd_count;                 
+} MTP_Sender;
+
+typedef struct{
+    int udp_sockfd;
+} MTP_socket;
 
 
 typedef struct{
@@ -97,15 +108,15 @@ typedef struct{
     struct sockaddr src_addr;    // Source IP + port
     MTP_Sender sender;
     MTP_Receiver receiver;
+
 } MTP_SM_entry;
 
 
-
 typedef struct{
-    // PIDQueue pid_queue;
     pthread_mutex_t lock_sm;
     MTP_SM_entry sm_entry[MAX_SOCKETS];
     int count_occupied;
+    NodeSlot  node_pool[MAX_NODES]; 
 } MTP_SM;
 
 // ------------------- API Functions -------------------
@@ -128,6 +139,8 @@ int is_full_buffer(int socket_id, int flag);
 int get_buffer_size(int socket_id, int flag);
 int remove_from_buffer(int socket_id, MTP_Message *msg, int flag);
 int add_to_buffer(int socket_id, MTP_Message *msg, int flag);
+Node* get_node(void *base, int offset);
+void* base_finder(int shmid);
 // void initQueue_pid(PIDQueue *q);
 // int is_Empty_pid(PIDQueue *q);
 // void enqueue_pid(PIDQueue *q, pid_t pid, char* filename);
