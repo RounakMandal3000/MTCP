@@ -80,19 +80,30 @@ int m_socket(int domain, int type, int protocol){
         pthread_mutex_lock(&sm->lock_sm);
         sm->count_occupied++;
         pthread_mutex_unlock(&sm->lock_sm);
+        
         for(int i = 0; i < MAX_SOCKETS; i++){
             pthread_mutex_lock(&(sm->sm_entry[i].lock));
             if(sm->sm_entry[i].free_slot){
-                sm->sm_entry[i].free_slot = false;
                 sm->sm_entry[i].pid_creation = getpid();
-                sm->sm_entry[i].sock.udp_sockfd = socket(domain, SOCK_DGRAM, protocol);
-                // enqueue_pid(&sm->pid_queue, sm->sm_entry[i].pid_creation, );
-                if (sm->sm_entry[i].sock.udp_sockfd < 0){
+                sm->sm_entry[i].sock.udp_sockfd = -2;
+                pthread_mutex_lock(&sm->lock_sm);
+                sm->bind_socket = 0;
+                pthread_mutex_unlock(&sm->lock_sm);
+                pthread_mutex_unlock(&sm->sm_entry[i].lock);
+                sleep(1);
+                pthread_mutex_lock(&sm->sm_entry[i].lock);
+                if(sm->sm_entry[i].sock.udp_sockfd < 0){
+                    perror("socket creation failed");
+                    sm->sm_entry[i].free_slot = true;
+                    sm->sm_entry[i].pid_creation = -1;
                     pthread_mutex_unlock(&sm->sm_entry[i].lock);
                     // pthread_mutex_unlock(&sm->lock_sm);
                     return -1;
                 }
-
+                pthread_mutex_lock(&sm->lock_sm);
+                sm->bind_socket = -1;
+                pthread_mutex_unlock(&sm->lock_sm);
+                sm->sm_entry[i].free_slot = false;
                 pthread_mutex_unlock(&sm->sm_entry[i].lock);
                 // pthread_mutex_unlock(&sm->lock_sm);
                 return sm->sm_entry[i].sock.udp_sockfd;
@@ -116,15 +127,22 @@ int m_bind(int sockfd, struct sockaddr *src_addr, struct sockaddr *dest_addr, in
     for(int i=0; i<MAX_SOCKETS; i++){
         pthread_mutex_lock(&sm->sm_entry[i].lock);
         if(sm->sm_entry[i].sock.udp_sockfd == sockfd){
-            sm->sm_entry[i].src_addr = *src_addr;
-            sm->sm_entry[i].dest_addr = *dest_addr;
+            sm->sm_entry[i].src_addr = *(struct sockaddr_in *)src_addr;
+            sm->sm_entry[i].dest_addr = *(struct sockaddr_in *)dest_addr;
             // Bind the socket to the address
-            if (bind(sockfd, src_addr, addrlen) < 0) {
-                pthread_mutex_unlock(&sm->sm_entry[i].lock);
-                // pthread_mutex_unlock(&sm.lock_sm);
-                return -1;
-            }
+            // if (bind(sockfd, (struct sockaddr *)&sm->sm_entry[i].src_addr, addrlen) < 0) {
+            //     pthread_mutex_unlock(&sm->sm_entry[i].lock);
+            //     // pthread_mutex_unlock(&sm.lock_sm);
+            //     return -1;
+            // }
+            pthread_mutex_lock(&sm->lock_sm);
+            sm->bind_socket = 1;
+            pthread_mutex_unlock(&sm->lock_sm);
+
             pthread_mutex_unlock(&sm->sm_entry[i].lock);
+            pthread_mutex_lock(&sm->lock_sm);
+            sm->bind_socket = -1;
+            pthread_mutex_unlock(&sm->lock_sm);
             // pthread_mutex_unlock(&sm.lock_sm);
             return 0;
         }
@@ -168,7 +186,7 @@ int m_recvfrom(int sockfd, void *buf, int len, unsigned int flags, struct sockad
     // pthread_mutex_lock(&sm.lock_sm);
     for(int i=0;i<MAX_SOCKETS; i++){
         pthread_mutex_lock(&sm->sm_entry[i].lock);
-        if(memcmp(&sm->sm_entry[i].dest_addr, from, sizeof(struct sockaddr)) == 0){
+        if(memcmp(&sm->sm_entry[i].dest_addr, from, sizeof(struct sockaddr_in)) == 0){
             if (is_empty(i, 1)) {
                 errno = ENOMSG;
                 pthread_mutex_unlock(&sm->sm_entry[i].lock);
@@ -214,8 +232,8 @@ int m_close(int sockfd) {
     sm->sm_entry[i].sock.udp_sockfd = -1;
     sm->sm_entry[i].free_slot = true;
     sm->sm_entry[i].pid_creation = -1;
-    sm->sm_entry[i].src_addr = (struct sockaddr){0};
-    sm->sm_entry[i].dest_addr = (struct sockaddr){0};
+    sm->sm_entry[i].src_addr = (struct sockaddr_in){0};
+    sm->sm_entry[i].dest_addr = (struct sockaddr_in){0};
     init_recv_queue(i, 0);
     sm->sm_entry[i].sender.swnd_count = 0;
     memset(sm->sm_entry[i].sender.swnd, 0, sizeof(sm->sm_entry[i].sender.swnd));
@@ -477,10 +495,11 @@ int is_full(int socket_id, int flag) {
     else
         q = &g_sm->sm_entry[socket_id].sender.buffer;
 
-    if (q->count >= RECV_BUFFER) {
-        // clamp count to avoid overflow corruption
-        q->count = RECV_BUFFER;
-        return 1;
+    if (flag == 1){
+        if(q->count >= RECV_BUFFER) return 1;
+    }
+    else{
+        if(q->count >= SENDER_BUFFER) return 1;
     }
     return 0;
 }
@@ -496,14 +515,12 @@ void* file_to_sender_thread(void* arg) {
         return NULL;
     }
     
-    MTP_Sender sender = {0};
     int cnt=0;
     char line[MTP_MSG_SIZE];
     int i = 1, j_ = 0;
     for(j_ = 0;j_ < MAX_SOCKETS;j_++){
         pthread_mutex_lock(&g_sm->sm_entry[j_].lock);
         if(g_sm->sm_entry[j_].sock.udp_sockfd == sockfd){
-            sender = g_sm->sm_entry[j_].sender;
             cnt=1;
             pthread_mutex_unlock(&g_sm->sm_entry[j_].lock);
             break;
@@ -515,10 +532,8 @@ void* file_to_sender_thread(void* arg) {
         fclose(file);
         return NULL;
     }
-    printf("%d %d\n", g_sm->sm_entry[j_].sock.udp_sockfd, sender.swnd_count);
     while(true){
-
-        while (fgets(line, sizeof(line), file) && sender.swnd_count < SENDER_SWND) {
+        while (fgets(line, sizeof(line), file)) {
             pthread_mutex_lock(&g_sm->sm_entry[j_].lock);
             MTP_Message msg = {0};
             strncpy(msg.data, line, sizeof(msg.data) - 1);
@@ -527,25 +542,12 @@ void* file_to_sender_thread(void* arg) {
             msg.is_ack = false; // Not an ACK
             msg.wnd_sz= -1;
             msg.next_val = -1;
-            // struct timespec now;
-            // clock_gettime(CLOCK_MONOTONIC, &now);
-            // msg.sent_time = now;
-            int rv = enqueue_recv(j_, msg, 0);
-            
-            if (rv < 0) {
-                perror("Failed to enqueue message");
-                pthread_mutex_unlock(&g_sm->sm_entry[j_].lock);
-                sleep(T/3);
-                continue;
-            }
-            else{
-                printf("SUCCESS: %d\n", i);
-            }
-            
             pthread_mutex_unlock(&g_sm->sm_entry[j_].lock);
-            rv = m_sendto(sockfd, (const void *)&msg, sizeof(msg), 0, (const struct sockaddr *)&g_sm->sm_entry[j_].dest_addr, sizeof(g_sm->sm_entry[j_].dest_addr));
+            int rv = m_sendto(sockfd, (const void *)&msg, sizeof(msg), 0, (const struct sockaddr *)&g_sm->sm_entry[j_].dest_addr, sizeof(g_sm->sm_entry[j_].dest_addr));
             if (rv < 0) {
-                perror("Failed to send message");
+                perror("Failed to send_to message");
+                sleep(2);
+                continue;
             }
             i = (i)%16+1;
         }

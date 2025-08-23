@@ -21,13 +21,15 @@
 #define DROP_PROB 0.5           // Packet drop probability
 #define TIME_SEC 5              // Timeout duration in seconds
 #define TIME_USEC 0             // Timeout duration in microseconds
-#define MAX_NODES 50
-#define SHM_KEY 0x2425           // Shared memory key for inter-process communication
+#define MAX_NODES 1024
+#define SHM_KEY 0x2427           // Shared memory key for inter-process communication
 
 #define ENOBUFS 105  // No buffer space available error code
 #define ENOTBOUND 106 // Socket is not bound error code
 #define ENOMSG 107    // No message available error code
 #define EPROTONOSUPPORT 108 // Protocol not supported error code
+#define SOCK_PORT 12000
+#define SERVER_IP "127.0.0.1"
 
 // Convert offset <-> pointer relative to base
 #define OFFSET(base, ptr)   ((ptr) ? (size_t)((char*)(ptr) - (char*)(base)) : 0)
@@ -67,6 +69,13 @@ typedef struct RecvNode {
     size_t next;   
 } Node;
 
+typedef struct socketInfo
+{
+    int sockfd;
+    struct sockaddr_in addr;
+} socketInfo;
+
+
 typedef struct {
     int used;
     Node node;
@@ -104,11 +113,10 @@ typedef struct{
     MTP_socket sock;
     bool free_slot;
     pid_t pid_creation; // PID of the process that created this socket
-    struct sockaddr dest_addr;   // Destination IP + portbut 
-    struct sockaddr src_addr;    // Source IP + port
+    struct sockaddr_in dest_addr;   // Destination IP + portbut 
+    struct sockaddr_in src_addr;    // Source IP + port
     MTP_Sender sender;
     MTP_Receiver receiver;
-
 } MTP_SM_entry;
 
 
@@ -116,7 +124,8 @@ typedef struct{
     pthread_mutex_t lock_sm;
     MTP_SM_entry sm_entry[MAX_SOCKETS];
     int count_occupied;
-    NodeSlot  node_pool[MAX_NODES]; 
+    NodeSlot node_pool[MAX_NODES]; 
+    int bind_socket;
 } MTP_SM;
 
 // ------------------- API Functions -------------------

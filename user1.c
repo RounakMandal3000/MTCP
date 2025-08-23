@@ -50,6 +50,7 @@ int main(int argc, char *argv[])
         perror("Error binding MTP socket");
         exit(1);
     }
+    printf("MTP socket created successfully with fd: %d\n", sockfd);
     printf("Finding file...\n");
     FILE *fp = fopen(filename_src, "r");
     if (fp == NULL) {

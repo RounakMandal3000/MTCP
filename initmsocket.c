@@ -19,6 +19,17 @@
 #include <stdlib.h>
 #include <string.h>
 
+
+void print_fdset(fd_set *set, int maxfd) {
+    printf("FD_SET contents: [");
+    for (int fd = 0; fd < maxfd; fd++) {
+        if (FD_ISSET(fd, set)) {
+            printf(" %d", fd);
+        }
+    }
+    printf(" ]\n");
+}
+
 struct timespec default_time = {0};
 
 void* receiver_thread(void *arg);
@@ -51,6 +62,7 @@ int main(){
         perror("shmat failed");
         exit(1);
     }
+    g_sm->bind_socket = -1;
     g_sm->count_occupied = 0;
     g_sm->lock_sm = (pthread_mutex_t)PTHREAD_MUTEX_INITIALIZER;
     for (int i = 0; i < MAX_NODES; i++) {
@@ -71,8 +83,8 @@ int main(){
         g_sm->sm_entry[i].sock.udp_sockfd = -1;
         g_sm->sm_entry[i].free_slot = true;
         g_sm->sm_entry[i].pid_creation = -1;
-        g_sm->sm_entry[i].src_addr = (struct sockaddr){0};
-        g_sm->sm_entry[i].dest_addr = (struct sockaddr){0};
+        g_sm->sm_entry[i].src_addr = (struct sockaddr_in){0};
+        g_sm->sm_entry[i].dest_addr = (struct sockaddr_in){0};
         init_recv_queue(i, 0);
         g_sm->sm_entry[i].sender.swnd_count = 0;
         for (int j = 0; j < SENDER_SWND; j++) {
@@ -88,25 +100,7 @@ int main(){
         g_sm->sm_entry[i].receiver.rwnd_count = 0;
         g_sm->sm_entry[i].receiver.next_val = 1;
     }
-    // while(1){
-    //     // // Periodically check and clean up resources
-    //     // if(!is_Empty_pid(g_sm->pid_queue)){
-    //     //     while(!is_Empty_pid(g_sm->pid_queue)){
-    //     //         Node_pid node = dequeue_pid(&g_sm->pid_queue);
-    //     //         pid_t pid = node.pid;
-    //     //         char *filename = node.filename;
-    //     //         // Perform cleanup for the given PID
-    //     //         socket_function(pid, filename);
-    //     //     }
-    //     // }
-    //     sleep(1);
-    // }
-    // shmdt(g_sm);
-    socket_function();
-    return 0;
-}
-
-int socket_function(){
+    
     pthread_t tid_R, tid_S;
 
     if (pthread_create(&tid_R, NULL, receiver_thread, NULL) != 0) {
@@ -118,7 +112,35 @@ int socket_function(){
         perror("Failed to create sender thread");
         exit(1);
     }
-
+    while(1){
+        pthread_mutex_lock(&g_sm->lock_sm);
+        if(g_sm->bind_socket == 0){
+            for(int i=0; i<MAX_SOCKETS; i++){
+                pthread_mutex_lock(&g_sm->sm_entry[i].lock);
+                if(g_sm->sm_entry[i].sock.udp_sockfd == -2){
+                    int sockfd_ = socket(AF_INET, SOCK_DGRAM, 0);
+                    g_sm->sm_entry[i].sock.udp_sockfd = sockfd_;
+                }
+                pthread_mutex_unlock(&g_sm->sm_entry[i].lock);
+            }
+        }
+        else if(g_sm->bind_socket == 1){
+            for(int i=0; i<MAX_SOCKETS; i++){
+                pthread_mutex_lock(&g_sm->sm_entry[i].lock);
+                if(!g_sm->sm_entry[i].free_slot && g_sm->sm_entry[i].sock.udp_sockfd > 0 && g_sm->sm_entry[i].src_addr.sin_port == 0 && g_sm->sm_entry[i].dest_addr.sin_port == 0){
+                    struct sockaddr_in server_addr = g_sm->sm_entry[i].src_addr;
+                    if(bind(g_sm->sm_entry[i].sock.udp_sockfd, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0){
+                        perror("Failed to bind socket");
+                        close(g_sm->sm_entry[i].sock.udp_sockfd);
+                        pthread_mutex_unlock(&g_sm->sm_entry[i].lock);
+                    }
+                }
+                pthread_mutex_unlock(&g_sm->sm_entry[i].lock);
+            }
+        }
+        pthread_mutex_unlock(&g_sm->lock_sm);
+        sleep(1);
+    }
     if (pthread_join(tid_S, NULL) != 0) {
         perror("Failed to join sender thread");
         exit(1);
@@ -127,17 +149,10 @@ int socket_function(){
         perror("Failed to join receiver thread");
         exit(1);
     }
-    // if (pthread_create(&tid_garbage, NULL, garbage_collector_thread, NULL) != 0) {
-    //     perror("Failed to create garbage collector thread");
-    //     exit(1);
-    // }
-
-    pthread_join(tid_R, NULL);
-    pthread_join(tid_S, NULL);
-    // pthread_join(tid_garbage, NULL);
-
     return 0;
 }
+
+
 
 void* receiver_thread(void *arg) {
     printf("Receiver thread started\n");
@@ -148,40 +163,63 @@ void* receiver_thread(void *arg) {
         return NULL;
     }
     // loop: recvfrom() on UDP socket, update rwnd
-    fd_set rfds;
-    FD_ZERO(&rfds);
-    struct timeval tv;
-    tv.tv_sec = TIME_SEC;
-    tv.tv_usec = TIME_USEC;
-    int maxfd = -1;
+    
     while (1) {
         // blocking receive, e.g. recvfrom(sock, buf, ...);
         // pthread_mutex_lock(&g_sm->lock_sm);
         sleep(2);
+        fd_set rfds;
+        FD_ZERO(&rfds);
+        
+        int maxfd = -1;
         for (int i = 0; i < MAX_SOCKETS; ++i) {
             pthread_mutex_lock(&g_sm->sm_entry[i].lock);
-            if (g_sm->sm_entry[i].free_slot){
-                pthread_mutex_unlock(&g_sm->sm_entry[i].lock);
-                continue;
+            if (!g_sm->sm_entry[i].free_slot){
+                printf("free: %d\n", i);
+                int fd = g_sm->sm_entry[i].sock.udp_sockfd;
+                if (fd < 0) {
+                    printf("  Socket %d: invalid fd (%d), skipping\n", i, fd);
+                    pthread_mutex_unlock(&g_sm->sm_entry[i].lock);
+                    continue;
+                }
+                if(fd>=0){
+                    FD_SET(fd, &rfds);
+                    if (fd > maxfd) maxfd = fd;
+                }
+                else{
+                    printf("Skipping invalid fd=%d at slot=%d\n", fd, i);
+                }
+                // printf("RECEIVER SIDE src_ip: %s, src_port: %d, dest_ip: %s, dest_port: %d\n",
+                //    inet_ntoa(g_sm->sm_entry[i].src_addr.sin_addr),
+                //    ntohs(g_sm->sm_entry[i].src_addr.sin_port),
+                //    inet_ntoa(g_sm->sm_entry[i].dest_addr.sin_addr),
+                //    ntohs(g_sm->sm_entry[i].dest_addr.sin_port));
             }
-            int fd = g_sm->sm_entry[i].sock.udp_sockfd;
-            if (fd >= maxfd) maxfd = fd + 1;
             pthread_mutex_unlock(&g_sm->sm_entry[i].lock);
-            FD_SET(fd, &rfds);
-        }
 
-        int rv = select(maxfd, &rfds, NULL, NULL, &tv);
-        if (rv < 0) {
+            
+        }
+        print_fdset(&rfds, maxfd + 1);
+        if(maxfd==-1){
             continue;
         }
-        if (rv == 0) {                  // WRITE THIS LATER, TIMEOUT CASE
+        struct timeval tv;
+        tv.tv_sec = 5;
+        tv.tv_usec = 5;
+        printf("SELECT WILL START\n");
+        int rv = select(maxfd+1, &rfds, NULL, NULL, &tv);
+        printf("SELECT WILL END \n");
+        if (rv < 0) {
+            perror("select failed");
+            continue;
+        }
+        else if (rv == 0) {                  // WRITE THIS LATER, TIMEOUT CASE
             printf("Timeout occurred! No data after %d seconds.\n", TIME_SEC);
             continue;
         }
-        if(rv > 0){
+        else if(rv > 0){
+            printf("Data is available to read on the following sockets:\n");
 
-            printf("okay\n");
-            // pthread_mutex_lock(&g_sm->lock_sm);
             for (int i = 0; i < MAX_SOCKETS; ++i) {
                 pthread_mutex_lock(&g_sm->sm_entry[i].lock);
                 if (g_sm->sm_entry[i].free_slot) {
@@ -192,7 +230,7 @@ void* receiver_thread(void *arg) {
                 if (FD_ISSET(fd, &rfds)) {
                     // Data is available to read
                     MTP_Message *buf = malloc(sizeof(MTP_Message));
-                    struct sockaddr from = g_sm->sm_entry[i].dest_addr;
+                    struct sockaddr_in from = g_sm->sm_entry[i].dest_addr;
                     socklen_t fromlen = sizeof(from);
                     pthread_mutex_unlock(&g_sm->sm_entry[i].lock);
                     int n = recvfrom(fd, buf, sizeof(MTP_Message), 0, (struct sockaddr *)&from, &fromlen);
@@ -354,7 +392,7 @@ void* sender_thread(void *arg) {
                             + (now.tv_nsec - sender->swnd[j].sent_time.tv_nsec) / 1000000;
 
                     float elapsed = (float)ms / 1000.0f;  
-                    printf("elapsed %f\n", elapsed);
+                    // printf("elapsed %f\n", elapsed);
                     if(elapsed >= T) {
                         retransmit = 1;
                         break;
@@ -365,13 +403,41 @@ void* sender_thread(void *arg) {
                 // Retransmit packet
                 for (int j=0; j<SENDER_SWND; j++) {
                     if (sender->swnd[j].sent_time.tv_sec  != default_time.tv_sec || sender->swnd[j].sent_time.tv_nsec != default_time.tv_nsec) {
-                        printf("Retransmitting packet %d %s\n", sender->swnd[j].seq_num, sender->swnd[j].data);
-                        sendto(g_sm->sm_entry[i].sock.udp_sockfd, &sender->swnd[j], sizeof(MTP_Message), 0, (struct sockaddr *)&g_sm->sm_entry[i].dest_addr, sizeof(g_sm->sm_entry[i].dest_addr));
+
+
+                        struct sockaddr_in server_addr;
+                        memset(&server_addr, 0, sizeof(server_addr));
+                        server_addr.sin_family = AF_INET;
+                        server_addr.sin_port = htons(SOCK_PORT);
+                        server_addr.sin_addr.s_addr = inet_addr(SERVER_IP);
+                        int sockfd_temp = socket(AF_INET, SOCK_DGRAM, 0);
+                        if (sockfd_temp < 0) {
+                            perror("socket creation failed");
+                            continue;
+                        }
+                        if(bind(sockfd_temp, (struct sockaddr *)&server_addr, sizeof(server_addr))<0){
+                            perror("bind failed ");
+                            continue;
+                        }
+
+                       
+                        // sendto(g_sm->sm_entry[i].sock.udp_sockfd, &sender->swnd[j], sizeof(MTP_Message), 0, (struct sockaddr *)&g_sm->sm_entry[i].dest_addr, sizeof(g_sm->sm_entry[i].dest_addr));
+                        sendto(sockfd_temp, &sender->swnd[j], sizeof(MTP_Message), 0, (struct sockaddr *)&g_sm->sm_entry[i].dest_addr, sizeof(g_sm->sm_entry[i].dest_addr));
+
+
+
+                        // sendto(g_sm->sm_entry[i].sock.udp_sockfd, &sender->swnd[j], sizeof(MTP_Message), 0, (struct sockaddr *)&g_sm->sm_entry[i].dest_addr, sizeof(g_sm->sm_entry[i].dest_addr));
+                        // printf("SENDER SIDE src_ip: %s, src_port: %d, dest_ip: %s, dest_port: %d\n",
+                        //     inet_ntoa(g_sm->sm_entry[i].src_addr.sin_addr),
+                        //     ntohs(g_sm->sm_entry[i].src_addr.sin_port),
+                        //     inet_ntoa(g_sm->sm_entry[i].dest_addr.sin_addr),
+                        //     ntohs(g_sm->sm_entry[i].dest_addr.sin_port));
                         sender->swnd[j].sent_time = now; // Update sent time
+                        close(sockfd_temp);
                     }
                 }
             }
-            int j = 0;
+            int j = sender->swnd_count;
             pthread_mutex_unlock(&g_sm->sm_entry[i].lock);
             while(j<SENDER_SWND && !is_empty(i, 0)) {
                 // Send new packet
@@ -388,14 +454,40 @@ void* sender_thread(void *arg) {
                         continue;
                     }
                     buf.sent_time = now;
-
                     sender->swnd[j] = buf;
-
                     sender->swnd_count++;
 
-                    // printf("Sending new packet %d\n", sender->next_seq);
-                    sendto(g_sm->sm_entry[i].sock.udp_sockfd, &sender->swnd[j], sizeof(MTP_Message), 0, (struct sockaddr *)&g_sm->sm_entry[i].dest_addr, sizeof(g_sm->sm_entry[i].dest_addr));
 
+
+
+                    struct sockaddr_in server_addr;
+                    memset(&server_addr, 0, sizeof(server_addr));
+                    server_addr.sin_family = AF_INET;
+                    server_addr.sin_port = htons(SOCK_PORT);
+                    server_addr.sin_addr.s_addr = inet_addr(SERVER_IP);
+                    int sockfd_temp = socket(AF_INET, SOCK_DGRAM, 0);
+                    if (sockfd_temp < 0) {
+                        perror("socket creation failed");
+                        continue;
+                    }
+                    if(bind(sockfd_temp, (struct sockaddr *)&server_addr, sizeof(server_addr))<0){
+                            perror("bind failed uwuu");
+                    }
+
+                    printf("Sending new packet %d\n", sender->swnd[j].seq_num);
+
+
+
+
+                    sendto(sockfd_temp, &sender->swnd[j], sizeof(MTP_Message), 0, (struct sockaddr *)&g_sm->sm_entry[i].dest_addr, sizeof(g_sm->sm_entry[i].dest_addr));
+                    // sendto(g_sm->sm_entry[i].sock.udp_sockfd, &sender->swnd[j], sizeof(MTP_Message), 0, (struct sockaddr *)&g_sm->sm_entry[i].dest_addr, sizeof(g_sm->sm_entry[i].dest_addr));
+
+                    // printf("SENDER SIDE src_ip: %s, src_port: %d, dest_ip: %s, dest_port: %d\n",
+                        // inet_ntoa(g_sm->sm_entry[i].src_addr.sin_addr),
+                        // ntohs(g_sm->sm_entry[i].src_addr.sin_port),
+                        // inet_ntoa(g_sm->sm_entry[i].dest_addr.sin_addr),
+                        // ntohs(g_sm->sm_entry[i].dest_addr.sin_port));
+                    close(sockfd_temp);
                 }
                 j++;
                 pthread_mutex_unlock(&g_sm->sm_entry[i].lock);

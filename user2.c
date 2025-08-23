@@ -44,6 +44,7 @@ int main(int argc, char *argv[])
         perror("Error creating MTP socket");
         exit(1);
     }
+    printf("MTP socket created successfully with fd: %d\n", sockfd);
     printf("BINDING MTP socket...\n");
     rv = m_bind(rv, (struct sockaddr *)&src_addr, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
     if (rv < 0) {
