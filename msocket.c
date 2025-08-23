@@ -80,17 +80,21 @@ int m_socket(int domain, int type, int protocol){
         pthread_mutex_lock(&sm->lock_sm);
         sm->count_occupied++;
         pthread_mutex_unlock(&sm->lock_sm);
-        
+
         for(int i = 0; i < MAX_SOCKETS; i++){
             pthread_mutex_lock(&(sm->sm_entry[i].lock));
             if(sm->sm_entry[i].free_slot){
                 sm->sm_entry[i].pid_creation = getpid();
                 sm->sm_entry[i].sock.udp_sockfd = -2;
+
                 pthread_mutex_lock(&sm->lock_sm);
                 sm->bind_socket = 0;
                 pthread_mutex_unlock(&sm->lock_sm);
+
                 pthread_mutex_unlock(&sm->sm_entry[i].lock);
+
                 sleep(1);
+
                 pthread_mutex_lock(&sm->sm_entry[i].lock);
                 if(sm->sm_entry[i].sock.udp_sockfd < 0){
                     perror("socket creation failed");
@@ -100,9 +104,11 @@ int m_socket(int domain, int type, int protocol){
                     // pthread_mutex_unlock(&sm->lock_sm);
                     return -1;
                 }
+
                 pthread_mutex_lock(&sm->lock_sm);
                 sm->bind_socket = -1;
                 pthread_mutex_unlock(&sm->lock_sm);
+
                 sm->sm_entry[i].free_slot = false;
                 pthread_mutex_unlock(&sm->sm_entry[i].lock);
                 // pthread_mutex_unlock(&sm->lock_sm);
@@ -129,21 +135,21 @@ int m_bind(int sockfd, struct sockaddr *src_addr, struct sockaddr *dest_addr, in
         if(sm->sm_entry[i].sock.udp_sockfd == sockfd){
             sm->sm_entry[i].src_addr = *(struct sockaddr_in *)src_addr;
             sm->sm_entry[i].dest_addr = *(struct sockaddr_in *)dest_addr;
-            // Bind the socket to the address
-            // if (bind(sockfd, (struct sockaddr *)&sm->sm_entry[i].src_addr, addrlen) < 0) {
-            //     pthread_mutex_unlock(&sm->sm_entry[i].lock);
-            //     // pthread_mutex_unlock(&sm.lock_sm);
-            //     return -1;
-            // }
+            
             pthread_mutex_lock(&sm->lock_sm);
             sm->bind_socket = 1;
+            sm->sm_entry[i].to_bind = 1;
             pthread_mutex_unlock(&sm->lock_sm);
 
             pthread_mutex_unlock(&sm->sm_entry[i].lock);
+
+            sleep(1);
+
             pthread_mutex_lock(&sm->lock_sm);
             sm->bind_socket = -1;
+            sm->sm_entry[i].to_bind = 0;
             pthread_mutex_unlock(&sm->lock_sm);
-            // pthread_mutex_unlock(&sm.lock_sm);
+
             return 0;
         }
         pthread_mutex_unlock(&sm->sm_entry[i].lock);
@@ -193,11 +199,13 @@ int m_recvfrom(int sockfd, void *buf, int len, unsigned int flags, struct sockad
                 return -1;
             }
             int rv = dequeue_recv(i, (MTP_Message *)buf, 1);   // buf now stores the message
+            printf("size and index %d %d\n", sm->sm_entry[i].receiver.buffer.count, i);
             if (rv < 0) {
                 errno = ENOBUFS;
                 pthread_mutex_unlock(&sm->sm_entry[i].lock);
                 return -1;
             }
+            return rv;
         }
         pthread_mutex_unlock(&sm->sm_entry[i].lock);
     }
@@ -240,6 +248,7 @@ int m_close(int sockfd) {
     init_recv_queue(i, 1);
     sm->sm_entry[i].receiver.rwnd_count = 0;
     sm->sm_entry[i].receiver.next_val = 1;
+    sm->sm_entry[i].to_bind = 0;
     pthread_mutex_unlock(&sm->sm_entry[i].lock);
     // pthread_mutex_unlock(&sm->lock_sm);
     return 0;
@@ -591,6 +600,7 @@ void* receiver_to_file_thread(void* arg) {
             fprintf(file, "%s\n", buf.data);
             printf("Successfully wrote to file\n");
             fflush(file);
+            sleep(3);
         }
         pthread_mutex_unlock(&g_sm->sm_entry[j_].lock);
         sleep(3);
