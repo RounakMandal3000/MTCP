@@ -86,7 +86,7 @@ int m_socket(int domain, int type, int protocol){
             if(sm->sm_entry[i].free_slot){
                 sm->sm_entry[i].pid_creation = getpid();
                 sm->sm_entry[i].sock.udp_sockfd = -2;
-
+                printf("IDX: %d\n", i);
                 pthread_mutex_lock(&sm->lock_sm);
                 sm->bind_socket = 0;
                 pthread_mutex_unlock(&sm->lock_sm);
@@ -198,6 +198,11 @@ int m_recvfrom(int sockfd, void *buf, int len, unsigned int flags, struct sockad
                 pthread_mutex_unlock(&sm->sm_entry[i].lock);
                 return -1;
             }
+            if((sm->sm_entry[i].receiver.buffer.front - sm->r_ack[i] + MAX_SEQ_NUM)%MAX_SEQ_NUM < RECV_SWND){
+                printf("Buffer is not good\n");
+                pthread_mutex_unlock(&sm->sm_entry[i].lock);
+                return -1;
+            }
             int rv = dequeue_recv(i, (MTP_Message *)buf, 1);   // buf now stores the message
             printf("size and index %d %d\n", sm->sm_entry[i].receiver.buffer.count, i);
             if (rv < 0) {
@@ -205,6 +210,7 @@ int m_recvfrom(int sockfd, void *buf, int len, unsigned int flags, struct sockad
                 pthread_mutex_unlock(&sm->sm_entry[i].lock);
                 return -1;
             }
+            pthread_mutex_unlock(&sm->sm_entry[i].lock);
             return rv;
         }
         pthread_mutex_unlock(&sm->sm_entry[i].lock);
@@ -297,6 +303,26 @@ void init_recv_queue(int socket_id, int flag) {
     q->count = 0;
 }
 
+void print_queue(int socket_id, int flag) {
+    MTP_SM *g_sm = finder(SHM_KEY);
+    if (g_sm == NULL) {
+        perror("Failed to find shared memory");
+        return;
+    }
+    MTP_Queue *q;
+    if(flag==1)
+        q = &g_sm->sm_entry[socket_id].receiver.buffer;
+    else
+        q = &g_sm->sm_entry[socket_id].sender.buffer;
+
+    printf("Queue contents (count=%d): ", q->count);
+    Node *current = (Node*)PTR(g_sm, q->front);
+    while (current != NULL) {
+        printf("[SeqNum: %d] -> ", current->msg.seq_num);
+        current = (Node*)PTR(g_sm, current->next);
+    }
+    printf("NULL\n");
+}
 // int enqueue_recv(int socket_id, MTP_Message msg, int flag) {
 //     MTP_SM *g_sm = finder(SHM_KEY);
 //     printf("%p ajfa;lksfjlkafjslfj\n", (void *)g_sm);
@@ -526,7 +552,7 @@ void* file_to_sender_thread(void* arg) {
     
     int cnt=0;
     char line[MTP_MSG_SIZE];
-    int i = 1, j_ = 0;
+    int i = 0, j_ = 0;
     for(j_ = 0;j_ < MAX_SOCKETS;j_++){
         pthread_mutex_lock(&g_sm->sm_entry[j_].lock);
         if(g_sm->sm_entry[j_].sock.udp_sockfd == sockfd){
@@ -558,7 +584,7 @@ void* file_to_sender_thread(void* arg) {
                 sleep(2);
                 continue;
             }
-            i = (i)%16+1;
+            i = (i+1)%MAX_SEQ_NUM;
         }
         sleep(3);
     }
@@ -600,7 +626,7 @@ void* receiver_to_file_thread(void* arg) {
             fprintf(file, "%s\n", buf.data);
             printf("Successfully wrote to file\n");
             fflush(file);
-            sleep(3);
+            // sleep(40);
         }
         pthread_mutex_unlock(&g_sm->sm_entry[j_].lock);
         sleep(3);

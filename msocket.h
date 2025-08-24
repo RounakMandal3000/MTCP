@@ -127,6 +127,7 @@ typedef struct{
     int count_occupied;
     NodeSlot node_pool[MAX_NODES]; 
     int bind_socket;
+    int r_ack[MAX_NODES];
 } MTP_SM;
 
 // ------------------- API Functions -------------------
@@ -151,6 +152,7 @@ int remove_from_buffer(int socket_id, MTP_Message *msg, int flag);
 int add_to_buffer(int socket_id, MTP_Message *msg, int flag);
 Node* get_node(void *base, int offset);
 void* base_finder(int shmid);
+void print_queue(int socket_id, int flag);
 // void initQueue_pid(PIDQueue *q);
 // int is_Empty_pid(PIDQueue *q);
 // void enqueue_pid(PIDQueue *q, pid_t pid, char* filename);

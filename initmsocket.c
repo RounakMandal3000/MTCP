@@ -47,6 +47,10 @@ void initializer_message(MTP_Message* msg, bool is_ack){
     msg->sent_time = default_time;
 }
 
+int seq_num_finder(int seq_num, int expected){
+    return (seq_num - expected + MAX_SEQ_NUM) % MAX_SEQ_NUM;
+}
+
 int main(){
     
     int shmid;
@@ -64,6 +68,7 @@ int main(){
     }
     g_sm->bind_socket = -1;
     g_sm->count_occupied = 0;
+    memset(g_sm->r_ack, 0, sizeof(g_sm->r_ack));
     g_sm->lock_sm = (pthread_mutex_t)PTHREAD_MUTEX_INITIALIZER;
     for (int i = 0; i < MAX_NODES; i++) {
         g_sm->node_pool[i].used = 0;
@@ -174,6 +179,7 @@ void* receiver_thread(void *arg) {
         
         int maxfd = -1;
         for (int i = 0; i < MAX_SOCKETS; ++i) {
+            printf("i=%d\n", i);
             pthread_mutex_lock(&g_sm->sm_entry[i].lock);
             if (!g_sm->sm_entry[i].free_slot){
                 int fd = g_sm->sm_entry[i].sock.udp_sockfd;
@@ -217,75 +223,94 @@ void* receiver_thread(void *arg) {
                 int fd = g_sm->sm_entry[i].sock.udp_sockfd;
                 if (FD_ISSET(fd, &rfds)) {
                     // Data is available to read
-                    
-                    MTP_Message *buf = malloc(sizeof(MTP_Message));
-                    // struct sockaddr_in from = g_sm->sm_entry[i].dest_addr;
-                    struct sockaddr_in from;
-                    socklen_t fromlen = sizeof(from);
-                    pthread_mutex_unlock(&g_sm->sm_entry[i].lock);
-                    int n = recvfrom(fd, buf, sizeof(MTP_Message), 0, (struct sockaddr *)&from, &fromlen);
-                    if (n <= 0) {
-                        perror("recvfrom failed");
+                    for(int k=0; k<RECV_SWND; k++){
+                        MTP_Message *buf = malloc(sizeof(MTP_Message));
+                        // struct sockaddr_in from = g_sm->sm_entry[i].dest_addr;
+                        struct sockaddr_in from;
+                        socklen_t fromlen = sizeof(from);
                         pthread_mutex_unlock(&g_sm->sm_entry[i].lock);
-                        continue;
-                    }
-                    if(!buf->is_ack) { // Check for specific packet type
-                        // Process received packet
-                        printf("RECEIVED PACKET FROM %s:%d\n", inet_ntoa(from.sin_addr), ntohs(from.sin_port));
-
-                        MTP_Message *msg = (MTP_Message *)buf;
-                        if(g_sm->sm_entry[i].receiver.rwnd_count == RECV_SWND){
-                            perror("Receiver window is full");
+                        int n = recvfrom(fd, buf, sizeof(MTP_Message), 0, (struct sockaddr *)&from, &fromlen);
+                        
+                        if (n <= 0) {
+                            perror("recvfrom failed");
                             pthread_mutex_unlock(&g_sm->sm_entry[i].lock);
-                            continue;
+                            break;
                         }
-                        int ret = enqueue_recv(i, *msg, 1);
-                        if(ret < 0) {
-                            perror("enqueue_recv failed");
-                            pthread_mutex_unlock(&g_sm->sm_entry[i].lock);
-                            continue;
-                        }
-                        MTP_Message *ack_back = malloc(sizeof(MTP_Message));
-                        initializer_message(ack_back, true);
-                        int cnt = 0;
-                        if(!is_empty(i, 1)){
-                            Node *current = get_node(base, g_sm->sm_entry[i].receiver.buffer.front);
-                            while (current != 0) {
-                                if (current->msg.seq_num == buf->seq_num) {
-                                    cnt = -1;
-                                    break;
-                                }
-                                // current = current->next;
-                                if (current->next == 0){
-                                    current = 0;
-                                }
-                                else
-                                    current = get_node(base, current->next);    
+                        if(!buf->is_ack) { // Check for specific packet type
+                            int diff = seq_num_finder(buf->seq_num, g_sm->r_ack[i]);
+                            if(diff >= RECV_SWND){
+                                pthread_mutex_unlock(&g_sm->sm_entry[i].lock);
+                                continue;
                             }
-                        }
-                        if(cnt==0){             //NOT DUPLICATE
-                            if(!is_full(i, 1)){
-                                ack_back->seq_num = buf->seq_num;
-                                MTP_Queue *q = &g_sm->sm_entry[i].receiver.buffer;
-                                Node* current = get_node(base, q->front);
-                                if(q->count == 0)
-                                    enqueue_recv(i, *ack_back, 1);
-                                else{
-                                    if(current->msg.seq_num > buf->seq_num){
-                                        Node *temp = (Node*)malloc(sizeof(Node));
-                                        temp->msg = *ack_back;
-                                        temp->next = OFFSET(base, current);
-                                        q->front = OFFSET(base, temp);
-                                        q->count++;
+                            // Process received packet
+                            printf("RECEIVED PACKET SEQ NUM: %d\n", buf->seq_num);
+                            MTP_Message *msg = (MTP_Message *)buf;
+                            if(g_sm->sm_entry[i].receiver.rwnd_count == RECV_SWND){
+                                perror("Receiver window is full");
+                                pthread_mutex_unlock(&g_sm->sm_entry[i].lock);
+                                continue;
+                            }
+                            int ret = enqueue_recv(i, *msg, 1);
+                            if(ret < 0) {
+                                perror("enqueue_recv failed");
+                                pthread_mutex_unlock(&g_sm->sm_entry[i].lock);
+                                continue;
+                            }
+                            MTP_Message *ack_back = malloc(sizeof(MTP_Message));
+                            initializer_message(ack_back, true);
+                            int cnt = 0;
+                            if(!is_empty(i, 1)){
+                                Node *current = get_node(base, g_sm->sm_entry[i].receiver.buffer.front);
+                                while (current != 0) {
+                                    if (current->msg.seq_num == buf->seq_num) {
+                                        cnt = -1;
+                                        break;
                                     }
+                                    // current = current->next;
+                                    if (current->next == 0){
+                                        current = 0;
+                                    }
+                                    else
+                                        current = get_node(base, current->next);    
+                                }
+                            }
+                            if(cnt==0){             //NOT DUPLICATE
+                                if(!is_full(i, 1)){
+                                    ack_back->seq_num = buf->seq_num;
+                                    MTP_Queue *q = &g_sm->sm_entry[i].receiver.buffer;
+                                    Node* current = get_node(base, q->front);
+                                    if(q->count == 0)
+                                        enqueue_recv(i, *ack_back, 1);
                                     else{
-                                        while (current != 0) {
-                                            if((current->msg.seq_num < buf->seq_num && (current->next == 0 || get_node(base, current->next)->msg.seq_num > buf->seq_num))){
-                                                Node *temp = (Node*)malloc(sizeof(Node));
-                                                temp->msg = *ack_back;
-                                                temp->next = current->next;
-                                                current->next = OFFSET(base, temp);
-                                                q->count++;
+                                        if(seq_num_finder(current->msg.seq_num, g_sm->r_ack[i]) > seq_num_finder(buf->seq_num, g_sm->r_ack[i])){
+                                            Node *temp = (Node*)malloc(sizeof(Node));
+                                            temp->msg = *ack_back;
+                                            temp->next = OFFSET(base, current);
+                                            q->front = OFFSET(base, temp);
+                                            q->count++;
+                                        }
+                                        else{
+                                            while (current != 0) {
+                                                if((seq_num_finder(current->msg.seq_num, g_sm->r_ack[i]) < seq_num_finder(buf->seq_num, g_sm->r_ack[i])) && (current->next == 0 || seq_num_finder(get_node(base, current->next)->msg.seq_num, g_sm->r_ack[i]) > seq_num_finder(buf->seq_num, g_sm->r_ack[i]))){
+                                                    Node *temp = (Node*)malloc(sizeof(Node));
+                                                    temp->msg = *ack_back;
+                                                    temp->next = current->next;
+                                                    current->next = OFFSET(base, temp);
+                                                    q->count++;
+                                                    break;
+                                                }
+                                                if (current->next == 0)
+                                                    current = 0;
+                                                else
+                                                    current = get_node(base, current->next);
+                                            }
+                                        }                                    
+                                    }
+                                    current = get_node(base, q->front);
+                                    printf("COUNT OF NODES%d \n", q->count);
+                                    if(q->count!=1){
+                                        while (current->next!=0 && current != 0) {
+                                            if (get_node(base, current->next)->msg.seq_num != (current->msg.seq_num + 1)%MAX_SEQ_NUM) {
                                                 break;
                                             }
                                             if (current->next == 0)
@@ -293,56 +318,52 @@ void* receiver_thread(void *arg) {
                                             else
                                                 current = get_node(base, current->next);
                                         }
-                                    }                                    
+                                        ack_back->next_val = (get_node(base, current->next)->msg.seq_num + 1)%MAX_SEQ_NUM;
+                                    }
+                                    else{
+                                        ack_back->next_val = (get_node(base, current->next)->msg.seq_num + 1)%MAX_SEQ_NUM;
+                                        printf("hwlrwkjr\n");
+                                    }
+                                    ack_back->wnd_sz = q->count;
+
                                 }
-                                current = get_node(base, q->front);
+                            }
+                            else{
+                                MTP_Queue *q = &g_sm->sm_entry[i].receiver.buffer;
+                                ack_back->seq_num = buf->seq_num;
+                                ack_back->wnd_sz = q->count;
+                                Node *current = get_node(base, q->front);
                                 while (current->next!=0 && current != 0) {
-                                    if (get_node(base, current->next)->msg.seq_num != current->msg.seq_num + 1) {
+                                    if (get_node(base, current->next)->msg.seq_num != (current->msg.seq_num + 1)%MAX_SEQ_NUM) {
                                         break;
                                     }
-                                    if (current->next == 0)
-                                        current = 0;
-                                    else
-                                        current = get_node(base, current->next);
+                                    current = get_node(base, current->next);
                                 }
-                                ack_back->wnd_sz = q->count;
                                 ack_back->next_val = (get_node(base, current->next)->msg.seq_num + 1)%MAX_SEQ_NUM;
                             }
-                        }
-                        else{
-                            MTP_Queue *q = &g_sm->sm_entry[i].receiver.buffer;
-                            ack_back->seq_num = buf->seq_num;
-                            ack_back->wnd_sz = q->count;
-                            Node *current = get_node(base, q->front);
-                            while (current->next!=0 && current != 0) {
-                                if (get_node(base, current->next)->msg.seq_num != current->msg.seq_num + 1) {
-                                    break;
-                                }
-                                current = get_node(base, current->next);
-                            }
-                            ack_back->next_val = (get_node(base, current->next)->msg.seq_num + 1)%MAX_SEQ_NUM;
-                        }
-                        int mn = sendto(g_sm->sm_entry[i].sock.udp_sockfd, ack_back, sizeof(MTP_Message), 0, (struct sockaddr *)&g_sm->sm_entry[i].dest_addr, sizeof(g_sm->sm_entry[i].dest_addr));
+                            g_sm->r_ack[i] = ack_back->next_val;
+                            int mn = sendto(g_sm->sm_entry[i].sock.udp_sockfd, ack_back, sizeof(MTP_Message), 0, (struct sockaddr *)&g_sm->sm_entry[i].dest_addr, sizeof(g_sm->sm_entry[i].dest_addr));
 
-                        if (mn < 0) {
-                            perror("sendto failed");
-                            free(ack_back);
-                            pthread_mutex_unlock(&g_sm->sm_entry[i].lock);
-                            continue;
+                            if (mn < 0) {
+                                perror("sendto failed");
+                                free(ack_back);
+                                pthread_mutex_unlock(&g_sm->sm_entry[i].lock);
+                                continue;
+                            }
+                            // print_queue(i, 1);
+                            printf("SENT ACK\n");
                         }
-                        printf("SENT ACK\n");
-                    }
-                    else{    // HANDLE DUPLICATE MESSAGES
-                        // Process other packet types
-                        MTP_Message *msg = (MTP_Message *)buf;
-                        uint16_t seq_num = msg->seq_num;
-                        for(int j=0; j<SENDER_SWND; j++){
-                            if(g_sm->sm_entry[i].sender.swnd[j].seq_num == seq_num){
-                                g_sm->sm_entry[i].sender.swnd[j].sent_time = default_time;
-                                break;                            }
+                        else{    // HANDLE ACK MESSAGES
+                            // Process other packet types
+                            MTP_Message *msg = (MTP_Message *)buf;
+                            int cur_ack = msg->next_val;
+                            printf("RECEIVED ACK PACKET SEQ NUM and NEXT VALUE NEEDED: %d %d\n", cur_ack, msg->next_val);
+                            for(int j=0; j<SENDER_SWND; j++){
+                                if(seq_num_finder(g_sm->sm_entry[i].sender.swnd[j].seq_num, msg->next_val) >= MAX_SEQ_NUM){
+                                    g_sm->sm_entry[i].sender.swnd[j].sent_time = default_time;
+                                }
+                            }
                         }
-                        struct sockaddr_in *from_in = (struct sockaddr_in *)&from;
-                        printf("Received packet from %s:%d\n", inet_ntoa(from_in->sin_addr), ntohs(from_in->sin_port));
                     }
                 }
                 pthread_mutex_unlock(&g_sm->sm_entry[i].lock);
