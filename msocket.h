@@ -22,7 +22,7 @@
 #define TIME_SEC 5              // Timeout duration in seconds
 #define TIME_USEC 0             // Timeout duration in microseconds
 #define MAX_NODES 1024
-#define SHM_KEY 0x2428           // Shared memory key for inter-process communication
+#define SHM_KEY 0x2429           // Shared memory key for inter-process communication
 
 #define ENOBUFS 105  // No buffer space available error code
 #define ENOTBOUND 106 // Socket is not bound error code

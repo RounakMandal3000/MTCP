@@ -192,7 +192,9 @@ int m_recvfrom(int sockfd, void *buf, int len, unsigned int flags, struct sockad
     // pthread_mutex_lock(&sm.lock_sm);
     for(int i=0;i<MAX_SOCKETS; i++){
         pthread_mutex_lock(&sm->sm_entry[i].lock);
+        printf("hwle\n");
         if(memcmp(&sm->sm_entry[i].dest_addr, from, sizeof(struct sockaddr_in)) == 0){
+            printf("mewo\n");
             if (is_empty(i, 1)) {
                 errno = ENOMSG;
                 pthread_mutex_unlock(&sm->sm_entry[i].lock);
@@ -203,8 +205,10 @@ int m_recvfrom(int sockfd, void *buf, int len, unsigned int flags, struct sockad
                 pthread_mutex_unlock(&sm->sm_entry[i].lock);
                 return -1;
             }
-            int rv = dequeue_recv(i, (MTP_Message *)buf, 1);   // buf now stores the message
+            printf("mewoC____\n");
             printf("size and index %d %d\n", sm->sm_entry[i].receiver.buffer.count, i);
+            int rv = dequeue_recv(i, (MTP_Message *)buf, 1);   // buf now stores the message
+            printf("mewdfaskdhflkshf____\n");
             if (rv < 0) {
                 errno = ENOBUFS;
                 pthread_mutex_unlock(&sm->sm_entry[i].lock);
@@ -213,6 +217,7 @@ int m_recvfrom(int sockfd, void *buf, int len, unsigned int flags, struct sockad
             pthread_mutex_unlock(&sm->sm_entry[i].lock);
             return rv;
         }
+        printf("hwle____\n");
         pthread_mutex_unlock(&sm->sm_entry[i].lock);
     }
     // pthread_mutex_unlock(&sm.lock_sm);
@@ -316,10 +321,16 @@ void print_queue(int socket_id, int flag) {
         q = &g_sm->sm_entry[socket_id].sender.buffer;
 
     printf("Queue contents (count=%d): ", q->count);
-    Node *current = (Node*)PTR(g_sm, q->front);
+    printf("mweroq");
+    // Node *current = (Node*)PTR(g_sm, q->front);
+    Node *current = (Node*)PTR(q, q->front);
+
+    printf("mweroq");
     while (current != NULL) {
-        printf("[SeqNum: %d] -> ", current->msg.seq_num);
-        current = (Node*)PTR(g_sm, current->next);
+        // printf("[SeqNum: %d] -> ", current->msg.seq_num);
+        // current = (Node*)PTR(g_sm, current->next);
+        printf("hello -> ");
+        current = (Node*)PTR(q, current->next);
     }
     printf("NULL\n");
 }
@@ -440,7 +451,7 @@ int dequeue_recv(int socket_id, MTP_Message *msg, int flag) {
         perror("Failed to find shared memory");
         return -1;
     }
-
+    printf("1\n");
     MTP_Queue *q;
     if (flag == 1)
         q = &g_sm->sm_entry[socket_id].receiver.buffer;
@@ -451,23 +462,25 @@ int dequeue_recv(int socket_id, MTP_Message *msg, int flag) {
         // Queue is empty (0 means NULL offset)
         return -1;
     }
-
+    printf("2\n");
     // Get front node
     Node *front_node = (Node*)PTR(g_sm, q->front);
-
+    printf("3\n");
     // Copy message out
     *msg = front_node->msg;
-
     // Move front forward
+    printf("3.5\n");
+
     q->front = front_node->next;
 
     if (q->front == 0) {
         // Queue became empty
         q->rear = 0;
     }
-
+    printf("4\n");
     // Free node (return it to SHM allocator pool)
     free_node_in_shm(g_sm, front_node);
+    printf("5\n");
 
     q->count--;
     return 0;  // success

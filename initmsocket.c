@@ -250,19 +250,32 @@ void* receiver_thread(void *arg) {
                                 pthread_mutex_unlock(&g_sm->sm_entry[i].lock);
                                 continue;
                             }
-                            int ret = enqueue_recv(i, *msg, 1);
-                            if(ret < 0) {
-                                perror("enqueue_recv failed");
-                                pthread_mutex_unlock(&g_sm->sm_entry[i].lock);
-                                continue;
-                            }
+                            // int ret = enqueue_recv(i, *msg, 1);
+                            // if(ret < 0) {
+                            //     perror("enqueue_recv failed");
+                            //     pthread_mutex_unlock(&g_sm->sm_entry[i].lock);
+                            //     continue;
+                            // }
                             MTP_Message *ack_back = malloc(sizeof(MTP_Message));
                             initializer_message(ack_back, true);
                             int cnt = 0;
                             if(!is_empty(i, 1)){
                                 Node *current = get_node(base, g_sm->sm_entry[i].receiver.buffer.front);
                                 while (current != 0) {
-                                    if (current->msg.seq_num == buf->seq_num) {
+                                    printf("SEQUENCE NUMBER: %d ", current->msg.seq_num);
+                                    // current = current->next;
+                                    if (current->next == 0){
+                                        current = 0;
+                                    }
+                                    else
+                                        current = get_node(base, current->next);    
+                                }
+                            }
+                            printf("\n");
+                            if(!is_empty(i, 1)){
+                                Node *current = get_node(base, g_sm->sm_entry[i].receiver.buffer.front);
+                                while (current != 0) {
+                                    if (current->msg.seq_num == msg->seq_num) {
                                         cnt = -1;
                                         break;
                                     }
@@ -274,26 +287,34 @@ void* receiver_thread(void *arg) {
                                         current = get_node(base, current->next);    
                                 }
                             }
-                            if(cnt==0){             //NOT DUPLICATE
+                            printf("COUNT   %d \n", cnt);
+                            if(cnt==0){      
+                                printf("1\n");
                                 if(!is_full(i, 1)){
                                     ack_back->seq_num = buf->seq_num;
                                     MTP_Queue *q = &g_sm->sm_entry[i].receiver.buffer;
                                     Node* current = get_node(base, q->front);
-                                    if(q->count == 0)
-                                        enqueue_recv(i, *ack_back, 1);
+                                    printf("2\n");
+                                    if(q->count == 0){
+                                        // enqueue_recv(i, *ack_back, 1);
+                                        enqueue_recv(i, *msg, 1);
+                                    }
                                     else{
                                         if(seq_num_finder(current->msg.seq_num, g_sm->r_ack[i]) > seq_num_finder(buf->seq_num, g_sm->r_ack[i])){
                                             Node *temp = (Node*)malloc(sizeof(Node));
-                                            temp->msg = *ack_back;
+                                            // temp->msg = *ack_back;
+                                            temp->msg = *msg;
                                             temp->next = OFFSET(base, current);
                                             q->front = OFFSET(base, temp);
                                             q->count++;
+                                            printf("3\n");
                                         }
                                         else{
                                             while (current != 0) {
                                                 if((seq_num_finder(current->msg.seq_num, g_sm->r_ack[i]) < seq_num_finder(buf->seq_num, g_sm->r_ack[i])) && (current->next == 0 || seq_num_finder(get_node(base, current->next)->msg.seq_num, g_sm->r_ack[i]) > seq_num_finder(buf->seq_num, g_sm->r_ack[i]))){
                                                     Node *temp = (Node*)malloc(sizeof(Node));
-                                                    temp->msg = *ack_back;
+                                                    // temp->msg = *ack_back;
+                                                    temp->msg = *msg;
                                                     temp->next = current->next;
                                                     current->next = OFFSET(base, temp);
                                                     q->count++;
@@ -304,8 +325,10 @@ void* receiver_thread(void *arg) {
                                                 else
                                                     current = get_node(base, current->next);
                                             }
+                                            printf("4\n");
                                         }                                    
                                     }
+                                    printf("5\n");
                                     current = get_node(base, q->front);
                                     printf("COUNT OF NODES%d \n", q->count);
                                     if(q->count!=1){
@@ -327,6 +350,7 @@ void* receiver_thread(void *arg) {
                                     ack_back->wnd_sz = q->count;
 
                                 }
+                                print_queue(i, 1);
                             }
                             else{
                                 MTP_Queue *q = &g_sm->sm_entry[i].receiver.buffer;
@@ -350,7 +374,7 @@ void* receiver_thread(void *arg) {
                                 pthread_mutex_unlock(&g_sm->sm_entry[i].lock);
                                 continue;
                             }
-                            // print_queue(i, 1);
+                            print_queue(i, 1);
                             printf("SENT ACK\n");
                         }
                         else{    // HANDLE ACK MESSAGES
