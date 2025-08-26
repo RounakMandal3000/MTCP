@@ -175,7 +175,15 @@ int m_recvfrom(int sockfd, void *buf, int len, unsigned int flags, struct sockad
                     break;
                 }
             }
-            
+            for(int k=1; k<RECV_BUFFER; k++){
+                sm->sm_entry[i].receiver.buffer[k-1] = sm->sm_entry[i].receiver.buffer[k];
+            }
+            sm->sm_entry[i].receiver.buffer[RECV_BUFFER-1].seq_num = -1;
+            sm->r_ack[i]++;
+            for(int k=0;k<RECV_BUFFER;k++){
+                printf("%d ", sm->sm_entry[i].receiver.buffer[k].seq_num);
+            }
+            printf("\n");
             if (rv < 0) {
                 errno = ENOBUFS;
                 // pthread_mutex_unlock(&sm->sm_entry[i].lock);
@@ -278,6 +286,7 @@ void* file_to_sender_thread(void* arg) {
             strncpy(msg.data, line, sizeof(msg.data) - 1);
             msg.data[sizeof(msg.data) - 1] = '\0';
             msg.seq_num = i; // CHANGE THIS
+            printf("%d \n", msg.seq_num);
             msg.is_ack = false; // Not an ACK
             msg.wnd_sz= -1;
             msg.next_val = -1;
@@ -289,8 +298,8 @@ void* file_to_sender_thread(void* arg) {
                 continue;
             }
             i = (i+1)%MAX_SEQ_NUM;
+            // sleep(3);
         }
-        sleep(3);
     }
     fclose(file);
     return NULL;
@@ -322,9 +331,8 @@ void* receiver_to_file_thread(void* arg) {
         int addrlen = sizeof(g_sm->sm_entry[j_].dest_addr);
         if(g_sm->sm_entry[j_].receiver.buffer[0].seq_num == g_sm->r_ack[j_]){
             for(int j=0; j<RECV_BUFFER; j++){
-                printf("hello i am here now part 1\n");
                 int rv = m_recvfrom(sockfd, (void *)&buf, sizeof(buf), 0, (struct sockaddr *)&g_sm->sm_entry[j_].dest_addr, &addrlen);
-                printf("hello i am here now\n");
+                // printf("hello i am here now\n");
 
                 if (rv < 0) {
                     perror("Failed to receive message");
@@ -340,9 +348,7 @@ void* receiver_to_file_thread(void* arg) {
         }
         
         // pthread_mutex_lock(&g_sm->sm_entry[j_].lock);
-        // // for(int k=0;k<RECV_BUFFER;k++){
-
-        // // }
+        
         pthread_mutex_unlock(&g_sm->sm_entry[j_].lock);
         sleep(3);
     }

@@ -175,7 +175,7 @@ void* receiver_thread(void *arg) {
     while (1) {
         // blocking receive, e.g. recvfrom(sock, buf, ...);
         // pthread_mutex_lock(&g_sm->lock_sm);
-        sleep(2);
+        // sleep(2);
         fd_set rfds;
         FD_ZERO(&rfds);
         int maxfd = -1;
@@ -255,6 +255,7 @@ void* receiver_thread(void *arg) {
                         }
 
                         int next_val_required = g_sm->r_ack[i];
+                        printf("SEQ NUM RECEIVED: %d \n", msg->seq_num);
                         if(!duplicate_present){
                             if(count_buffer(i, 1) == 0){
                                 g_sm->sm_entry[i].receiver.buffer[0] = *msg;
@@ -262,6 +263,7 @@ void* receiver_thread(void *arg) {
                             else{
                                 for(int k=0; k<RECV_BUFFER; k++){
                                     if(g_sm->sm_entry[i].receiver.buffer[k].seq_num == -1){
+                                        g_sm->sm_entry[i].receiver.buffer[k] = *msg;
                                         break;
                                     }
                                     if(seq_num_finder(g_sm->sm_entry[i].receiver.buffer[k].seq_num, g_sm->r_ack[i]) > seq_num_finder(msg->seq_num, g_sm->r_ack[i])){
@@ -300,7 +302,12 @@ void* receiver_thread(void *arg) {
                             continue;
                         }
                         printf("SENT ACK: %d\n", ack_back->seq_num);
+                        for(int k=0;k<RECV_BUFFER;k++){
+                            printf("%d ", g_sm->sm_entry[i].receiver.buffer[k].seq_num);
+                        }
+                        printf("\n");
                         pthread_mutex_unlock(&g_sm->sm_entry[i].lock);
+                        
                         // g_sm->r_ack[i] = next_val_required;
                     }
                 
@@ -308,10 +315,12 @@ void* receiver_thread(void *arg) {
                         MTP_Message *msg = (MTP_Message *)buf;
                         printf("In ack handling, next val %d \n", msg->next_val);
                         for(int j=0; j<SENDER_SWND; j++){
-                            printf("SEQ NUMS %d \n", seq_num_finder(g_sm->sm_entry[i].sender.swnd[j].seq_num, msg->next_val) );
+                            printf("SEQ NUMS %d %d\n", g_sm->sm_entry[i].sender.swnd[j].seq_num, seq_num_finder(g_sm->sm_entry[i].sender.swnd[j].seq_num, msg->next_val) );
                             if(seq_num_finder(g_sm->sm_entry[i].sender.swnd[j].seq_num, msg->next_val) >= SENDER_SWND){
                                 g_sm->sm_entry[i].sender.swnd[j].sent_time = default_time;
-                                printf("FREED A SENDER WINDOW ENTRY\n");
+                                g_sm->sm_entry[i].sender.swnd_count--;
+                                g_sm->sm_entry[i].sender.swnd[j].seq_num = -1;
+                                // printf("FREED A SENDER WINDOW ENTRY\n");
                             }
                         }
                         printf("\n");
