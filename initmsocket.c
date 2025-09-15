@@ -209,7 +209,7 @@ void* receiver_thread(void *arg) {
             printf("Timeout occurred! No data after %d seconds.\n", TIME_SEC);
             continue;
         }
-        printf("Data is available to read\n");
+        // printf("Data is available to read\n");
 
         for (int i = 0; i < MAX_SOCKETS; ++i) {
             // printf("%d ", i);
@@ -221,7 +221,7 @@ void* receiver_thread(void *arg) {
             // printf("!!!!!!!__\n");
             int fd = g_sm->sm_entry[i].sock.udp_sockfd;
             if (FD_ISSET(fd, &rfds)) {
-                printf("%d \n", i);
+                // printf("%d \n", i);
                 // Data is available to read
                 for(int k=0; k<RECV_SWND; k++){
 
@@ -255,7 +255,7 @@ void* receiver_thread(void *arg) {
                         }
 
                         int next_val_required = g_sm->r_ack[i];
-                        printf("SEQ NUM RECEIVED: %d \n", msg->seq_num);
+                        // printf("SEQ NUM RECEIVED: %d \n", msg->seq_num);
                         if(!duplicate_present){
                             if(count_buffer(i, 1) == 0){
                                 g_sm->sm_entry[i].receiver.buffer[0] = *msg;
@@ -294,6 +294,7 @@ void* receiver_thread(void *arg) {
                             }
                         }
                         ack_back->next_val = next_val_required;
+                        printf("ACK_BACK: %d\n", ack_back->next_val);
                         int mn = sendto(g_sm->sm_entry[i].sock.udp_sockfd, ack_back, sizeof(MTP_Message), 0, (struct sockaddr *)&g_sm->sm_entry[i].dest_addr, sizeof(g_sm->sm_entry[i].dest_addr));
                         if (mn < 0) {
                             perror("sendto failed");
@@ -301,11 +302,11 @@ void* receiver_thread(void *arg) {
                             pthread_mutex_unlock(&g_sm->sm_entry[i].lock);
                             continue;
                         }
-                        printf("SENT ACK: %d\n", ack_back->seq_num);
-                        for(int k=0;k<RECV_BUFFER;k++){
-                            printf("%d ", g_sm->sm_entry[i].receiver.buffer[k].seq_num);
-                        }
-                        printf("\n");
+                        // printf("SENT ACK: %d\n", ack_back->seq_num);
+                        // for(int k=0;k<RECV_BUFFER;k++){
+                        //     printf("%d ", g_sm->sm_entry[i].receiver.buffer[k].seq_num);
+                        // }
+                        // printf("\n");
                         pthread_mutex_unlock(&g_sm->sm_entry[i].lock);
                         
                         // g_sm->r_ack[i] = next_val_required;
@@ -313,24 +314,25 @@ void* receiver_thread(void *arg) {
                 
                     else{    // HANDLE ACK MESSAGES
                         MTP_Message *msg = (MTP_Message *)buf;
-                        printf("In ack handling, next val %d \n", msg->next_val);
+                        printf("In ack handling, next val %d %d %d\n", msg->next_val, msg->seq_num, g_sm->sm_entry[i].sender.swnd_count);
                         for(int j=0; j<SENDER_SWND; j++){
-                            printf("SEQ NUMS %d %d\n", g_sm->sm_entry[i].sender.swnd[j].seq_num, seq_num_finder(g_sm->sm_entry[i].sender.swnd[j].seq_num, msg->next_val) );
-                            if(seq_num_finder(g_sm->sm_entry[i].sender.swnd[j].seq_num, msg->next_val) >= SENDER_SWND){
+                            // printf("SEQ NUMS %d %d\n", g_sm->sm_entry[i].sender.swnd[j].seq_num, seq_num_finder(g_sm->sm_entry[i].sender.swnd[j].seq_num, msg->next_val) );
+                            if(g_sm->sm_entry[i].sender.swnd[j].seq_num!=-1 && seq_num_finder(g_sm->sm_entry[i].sender.swnd[j].seq_num, msg->next_val) >= SENDER_SWND && g_sm->sm_entry[i].sender.swnd_count>0){
                                 g_sm->sm_entry[i].sender.swnd[j].sent_time = default_time;
-                                g_sm->sm_entry[i].sender.swnd_count--;
+                                g_sm->sm_entry[i].sender.swnd_count -= 1;
                                 g_sm->sm_entry[i].sender.swnd[j].seq_num = -1;
+                                break;
                                 // printf("FREED A SENDER WINDOW ENTRY\n");
                             }
                         }
-                        printf("\n");
+                        // printf("\n");
                     }
                 }
                 pthread_mutex_unlock(&g_sm->sm_entry[i].lock);
             }
             pthread_mutex_unlock(&g_sm->sm_entry[i].lock);
         }
-        printf("\n");
+        // printf("\n");
     }
     return NULL;
 }
@@ -357,14 +359,15 @@ void* sender_thread(void *arg) {
                 continue;
             }
 
-            MTP_Sender *sender = &g_sm->sm_entry[i].sender;
+            // MTP_Sender *sender = &g_sm->sm_entry[i].sender;
+            // printf("hewllo"); 
             int retransmit = 0;
             // Check sliding window, send packets
             for (int j = 0; j < SENDER_SWND; ++j) {
-                if (sender->swnd[j].sent_time.tv_sec  != default_time.tv_sec || sender->swnd[j].sent_time.tv_nsec != default_time.tv_nsec) {
+                if (g_sm->sm_entry[i].sender.swnd[j].sent_time.tv_sec  != default_time.tv_sec || g_sm->sm_entry[i].sender.swnd[j].sent_time.tv_nsec != default_time.tv_nsec) {
                     // Handle retransmission
-                    long ms = (now.tv_sec - sender->swnd[j].sent_time.tv_sec) * 1000
-                            + (now.tv_nsec - sender->swnd[j].sent_time.tv_nsec) / 1000000;
+                    long ms = (now.tv_sec - g_sm->sm_entry[i].sender.swnd[j].sent_time.tv_sec) * 1000
+                            + (now.tv_nsec - g_sm->sm_entry[i].sender.swnd[j].sent_time.tv_nsec) / 1000000;
 
                     float elapsed = (float)ms / 1000.0f;  
                     if(elapsed >= T) {
@@ -376,40 +379,60 @@ void* sender_thread(void *arg) {
             if(retransmit) {
                 // Retransmit packet
                 for (int j=0; j<SENDER_SWND; j++) {
-                    if (sender->swnd[j].sent_time.tv_sec  != default_time.tv_sec || sender->swnd[j].sent_time.tv_nsec != default_time.tv_nsec) {
-                        sendto(g_sm->sm_entry[i].sock.udp_sockfd, &sender->swnd[j], sizeof(MTP_Message), 0, (struct sockaddr *)&g_sm->sm_entry[i].dest_addr, sizeof(g_sm->sm_entry[i].dest_addr));
-                        sender->swnd[j].sent_time = now; // Update sent time
+                    if (g_sm->sm_entry[i].sender.swnd[j].sent_time.tv_sec  != default_time.tv_sec || g_sm->sm_entry[i].sender.swnd[j].sent_time.tv_nsec != default_time.tv_nsec) {
+                        sendto(g_sm->sm_entry[i].sock.udp_sockfd, &g_sm->sm_entry[i].sender.swnd[j], sizeof(MTP_Message), 0, (struct sockaddr *)&g_sm->sm_entry[i].dest_addr, sizeof(g_sm->sm_entry[i].dest_addr));
+                        g_sm->sm_entry[i].sender.swnd[j].sent_time = now; // Update sent time
                     }
                 }
+                printf("retransmitting");
             }
-            int j = sender->swnd_count;
+            int j = g_sm->sm_entry[i].sender.swnd_count;
             pthread_mutex_unlock(&g_sm->sm_entry[i].lock);
             while(j<SENDER_SWND && count_buffer(i, 0)>0) {
                 // Send new packet
                 pthread_mutex_lock(&g_sm->sm_entry[i].lock);
-                if((sender->swnd[j].sent_time.tv_sec  == default_time.tv_sec && sender->swnd[j].sent_time.tv_nsec == default_time.tv_nsec)){
+                
+                if((g_sm->sm_entry[i].sender.swnd[j].sent_time.tv_sec  == default_time.tv_sec && g_sm->sm_entry[i].sender.swnd[j].sent_time.tv_nsec == default_time.tv_nsec)){
                     MTP_Message buf;
                     memset(&buf, 0, sizeof(buf));
                     // int rv = dequeue_recv(i, &buf, 0);
                     int rv = 1;
                     buf = g_sm->sm_entry[i].sender.buffer[0];
+                    
                     for(int k=1; k<SENDER_BUFFER; k++){
                         g_sm->sm_entry[i].sender.buffer[k-1] = g_sm->sm_entry[i].sender.buffer[k];
                     }
                     initializer_message(&(g_sm->sm_entry[i].sender.buffer[SENDER_BUFFER-1]), false);
+                    
                     if (rv < 0) {
                         perror("Failed to dequeue message");
                         pthread_mutex_unlock(&g_sm->sm_entry[i].lock);
                         continue;
                     }
                     buf.sent_time = now;
-                    sender->swnd[j] = buf;
-                    sender->swnd_count++;
-                    printf("Sending new packet %d\n", sender->swnd[j].seq_num);
-                    sendto(g_sm->sm_entry[i].sock.udp_sockfd, &sender->swnd[j], sizeof(MTP_Message), 0, (struct sockaddr *)&g_sm->sm_entry[i].dest_addr, sizeof(g_sm->sm_entry[i].dest_addr));
+                
+                    // printf("index %d\n", j);
+                    g_sm->sm_entry[i].sender.swnd[j] = buf;
+                    g_sm->sm_entry[i].sender.swnd_count++;
+                    // g_sm->sm_entry[i].sender.buffer[0] = store_buf;
+                    printf("Sender window first entry: %d\n", g_sm->sm_entry[i].sender.buffer[0].seq_num);
+                    printf("Sending new packet %d New sender window: %d\n", g_sm->sm_entry[i].sender.swnd[j].seq_num, g_sm->sm_entry[i].sender.swnd_count);
+                    sendto(g_sm->sm_entry[i].sock.udp_sockfd, &g_sm->sm_entry[i].sender.swnd[j], sizeof(MTP_Message), 0, (struct sockaddr *)&g_sm->sm_entry[i].dest_addr, sizeof(g_sm->sm_entry[i].dest_addr));
                 }
                 j++;
+                printf("SENDER BUFFER: ");
+                for(int k=0;k<SENDER_BUFFER;k++){
+                        printf("%d ", g_sm->sm_entry[i].sender.buffer[k].seq_num);
+                }
+                printf("\n");
+                printf("SENDER WINDOW: ");
+                for(int k=0;k<SENDER_SWND;k++){
+                    printf("%d ", g_sm->sm_entry[i].sender.swnd[k].seq_num);
+                }
+                printf("\n");
                 pthread_mutex_unlock(&g_sm->sm_entry[i].lock);
+
+                
             }
             pthread_mutex_unlock(&g_sm->sm_entry[i].lock);
         }

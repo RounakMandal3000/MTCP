@@ -165,6 +165,11 @@ int m_recvfrom(int sockfd, void *buf, int len, unsigned int flags, struct sockad
                 return -1;
             }
             int rv = -1;
+            printf("RECEIVER BUFFER BEFORE REMOVAL: ");
+            for(int k=0;k<RECV_BUFFER;k++){
+                printf("%d ", sm->sm_entry[i].receiver.buffer[k].seq_num);
+            }
+            printf("\n");
             *(MTP_Message *) buf = sm->sm_entry[i].receiver.buffer[0];
             for(int k=0; k<RECV_BUFFER; k++){
                 if(sm->sm_entry[i].receiver.buffer[k].seq_num != -1){
@@ -175,12 +180,15 @@ int m_recvfrom(int sockfd, void *buf, int len, unsigned int flags, struct sockad
                     break;
                 }
             }
+            
             for(int k=1; k<RECV_BUFFER; k++){
                 sm->sm_entry[i].receiver.buffer[k-1] = sm->sm_entry[i].receiver.buffer[k];
             }
             sm->sm_entry[i].receiver.buffer[RECV_BUFFER-1].seq_num = -1;
             sm->r_ack[i]++;
-            for(int k=0;k<RECV_BUFFER;k++){
+
+            printf("\nRECEIVER BUFFER AFTER REMOVAL: ");
+            for (int k = 0; k < RECV_BUFFER; k++) {
                 printf("%d ", sm->sm_entry[i].receiver.buffer[k].seq_num);
             }
             printf("\n");
