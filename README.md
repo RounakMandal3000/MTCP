@@ -1,4 +1,4 @@
-# MTCP (Mini Transport Protocol over UDP)
+# MTCP (Message oriented TCP over UDP)
 
 A minimal reliable message transfer layer built on top of UDP. It implements a sliding window, cumulative acknowledgments, basic loss handling (with simulated drop probability), shared-memory based socket table, and automatic garbage collection of orphaned sockets.
 
