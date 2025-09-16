@@ -109,12 +109,6 @@ int main(){
         memset(g_sm->sm_entry[i].receiver.whether_taken, 0, sizeof(g_sm->sm_entry[i].receiver.whether_taken));
         g_sm->sm_entry[i].receiver.rwnd_count = 0;
         g_sm->sm_entry[i].receiver.next_val = 0;
-        g_sm->sm_entry[i].total_bytes = 0;
-        g_sm->sm_entry[i].sent_bytes = 0;
-        g_sm->sm_entry[i].retransmissions = 0;
-        g_sm->sm_entry[i].last_progress_bytes = 0;
-        g_sm->sm_entry[i].progress_initialized = 0;
-        g_sm->sm_entry[i].start_time = default_time;
     }
     
     pthread_t tid_R, tid_S, tid_GC;
@@ -382,8 +376,7 @@ void* sender_thread(void *arg) {
                     if(elapsed >= T) {
                         sendto(g_sm->sm_entry[i].sock.udp_sockfd, &g_sm->sm_entry[i].sender.swnd[j], sizeof(MTP_Message), 0, (struct sockaddr *)&g_sm->sm_entry[i].dest_addr, sizeof(g_sm->sm_entry[i].dest_addr));
                         g_sm->sm_entry[i].sender.swnd[j].sent_time = now; 
-                        g_sm->sm_entry[i].retransmissions++;
-                        MTP_LOG_WARN("retransmit seq=%d slot=%d (rtx=%ld)", g_sm->sm_entry[i].sender.swnd[j].seq_num, i, g_sm->sm_entry[i].retransmissions);
+                        MTP_LOG_WARN("retransmit seq=%d slot=%d", g_sm->sm_entry[i].sender.swnd[j].seq_num, i);
                     }
                 }
             }
@@ -418,11 +411,6 @@ void* sender_thread(void *arg) {
                     g_sm->sm_entry[i].sender.swnd_count++;
                     sendto(g_sm->sm_entry[i].sock.udp_sockfd, &g_sm->sm_entry[i].sender.swnd[j], sizeof(MTP_Message), 0, (struct sockaddr *)&g_sm->sm_entry[i].dest_addr, sizeof(g_sm->sm_entry[i].dest_addr));
                     MTP_LOG_INFO("tx new seq=%d slot=%d", g_sm->sm_entry[i].sender.swnd[j].seq_num, i);
-                    // lightweight progress heartbeat (no byte change, just show window status)
-                    if(g_sm->sm_entry[i].progress_initialized && (g_sm->sm_entry[i].sent_bytes - g_sm->sm_entry[i].last_progress_bytes) >= 16*1024){
-                        g_sm->sm_entry[i].last_progress_bytes = g_sm->sm_entry[i].sent_bytes;
-                        mtp_progress_log(&g_sm->sm_entry[i], i);
-                    }
                 }
                 j++;
                 pthread_mutex_unlock(&g_sm->sm_entry[i].lock);

@@ -266,10 +266,6 @@ void* file_to_sender_thread(void* arg) {
         perror("Failed to open file");
         return NULL;
     }
-    // Determine file size for progress metrics
-    fseek(file, 0, SEEK_END);
-    long total_bytes = ftell(file);
-    fseek(file, 0, SEEK_SET);
     
     int cnt=0;
     char line[MTP_MSG_SIZE];
@@ -288,16 +284,6 @@ void* file_to_sender_thread(void* arg) {
         fclose(file);
         return NULL;
     }
-    // Initialize progress counters if not yet
-    pthread_mutex_lock(&g_sm->sm_entry[j_].lock);
-    if(!g_sm->sm_entry[j_].progress_initialized){
-        g_sm->sm_entry[j_].total_bytes = total_bytes;
-        g_sm->sm_entry[j_].sent_bytes = 0;
-        clock_gettime(CLOCK_MONOTONIC, &g_sm->sm_entry[j_].start_time);
-        g_sm->sm_entry[j_].progress_initialized = 1;
-        MTP_LOG_INFO("progress init slot=%d total=%ldB", j_, total_bytes);
-    }
-    pthread_mutex_unlock(&g_sm->sm_entry[j_].lock);
     MTP_LOG_INFO("file->sender thread started slot=%d fd=%d", j_, sockfd);
     while(true){
         sleep(1);
@@ -327,16 +313,6 @@ void* file_to_sender_thread(void* arg) {
                 }
                 fprintf(file, "%s\n", msg.data);
                 fclose(file);
-                // Progress update
-                pthread_mutex_lock(&g_sm->sm_entry[j_].lock);
-                if(g_sm->sm_entry[j_].progress_initialized){
-                    g_sm->sm_entry[j_].sent_bytes += (long)strnlen(msg.data, MTP_MSG_SIZE);
-                    if(g_sm->sm_entry[j_].sent_bytes - g_sm->sm_entry[j_].last_progress_bytes >= 32*1024 || g_sm->sm_entry[j_].sent_bytes >= g_sm->sm_entry[j_].total_bytes){
-                        g_sm->sm_entry[j_].last_progress_bytes = g_sm->sm_entry[j_].sent_bytes;
-                        mtp_progress_log(&g_sm->sm_entry[j_], j_);
-                    }
-                }
-                pthread_mutex_unlock(&g_sm->sm_entry[j_].lock);
             }
             if (rv < 0) {
                 MTP_LOG_WARN("send attempt failed (slot=%d) will retry: %s", j_, strerror(errno));

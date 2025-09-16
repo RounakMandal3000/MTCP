@@ -8,24 +8,6 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <stdio.h>   // for fprintf, stderr in logging helpers
-#include <time.h>     // for struct timespec, clock_gettime
-
-// Fallback for environments lacking CLOCK_MONOTONIC (e.g., some MinGW variants)
-#ifndef CLOCK_MONOTONIC
-#define CLOCK_MONOTONIC 1
-#endif
-
-#if defined(_WIN32) && !defined(__MINGW32__)
-// Simple emulation using clock() (low resolution). For real high-res use QueryPerformanceCounter.
-static inline int mtp_clock_gettime_fake(int clk_id, struct timespec *ts){
-    (void)clk_id;
-    clock_t c = clock();
-    ts->tv_sec = c / CLOCKS_PER_SEC;
-    ts->tv_nsec = (long)((c % CLOCKS_PER_SEC) * (1000000000L / CLOCKS_PER_SEC));
-    return 0;
-}
-#define clock_gettime(a,b) mtp_clock_gettime_fake(a,b)
-#endif
 #define MTP_MSG_SIZE   1024     // 1 KB fixed message size
 #define SEQ_BITS       4        // 4-bit sequence number
 #define MAX_SEQ_NUM    (1 << SEQ_BITS) // 16 unique seq numbers
@@ -41,7 +23,7 @@ static inline int mtp_clock_gettime_fake(int clk_id, struct timespec *ts){
 #define TIME_SEC 5              // Timeout duration in seconds
 #define TIME_USEC 0             // Timeout duration in microseconds
 #define MAX_NODES 1024
-#define SHM_KEY 0x2434          // Shared memory key for inter-process communication
+#define SHM_KEY 0x2433           // Shared memory key for inter-process communication
 
 #define ENOBUFS 105  // No buffer space available error code
 #define ENOTBOUND 106 // Socket is not bound error code
@@ -131,13 +113,6 @@ typedef struct{
     MTP_Sender sender;
     MTP_Receiver receiver;
     int to_bind;
-    // --- Progress / stats ---
-    long total_bytes;              // total payload bytes intended to send (sender side)
-    long sent_bytes;               // bytes enqueued/sent (approx)
-    long retransmissions;          // count of retransmissions
-    long last_progress_bytes;      // last bytes value when we logged progress
-    struct timespec start_time;    // when first progress initialized
-    int progress_initialized;      // flag: 1 if total_bytes set
 } MTP_SM_entry;
 
 
@@ -179,7 +154,6 @@ typedef struct{
 #define MTP_LOG_WARN(fmt, ...)  fprintf(stderr, MTP_TAG("[WARN] ", MTP_CLR_YELLOW) fmt "%s", ##__VA_ARGS__, "\n")
 #define MTP_LOG_ERR(fmt, ...)   fprintf(stderr, MTP_TAG("[ERR ] ", MTP_CLR_RED) fmt "%s", ##__VA_ARGS__, "\n")
 #define MTP_LOG_DEBUG(fmt, ...) fprintf(stderr, MTP_TAG("[DBG ] ", MTP_CLR_DIM) fmt "%s", ##__VA_ARGS__, "\n")
-#define MTP_LOG_PROGRESS(fmt, ...) fprintf(stderr, MTP_TAG("[PROG] ", MTP_CLR_GREEN) fmt "%s", ##__VA_ARGS__, "\n")
 
 // Compact window snapshot helpers (implemented inline for header-only ease)
 static inline void mtp_print_window_sender(const MTP_Sender *s){
@@ -207,33 +181,6 @@ static inline void mtp_print_buffer_receiver(const MTP_Receiver *r){
         if(sn==-1) fprintf(stderr, " __"); else fprintf(stderr, " %02d", sn);
     }
     fprintf(stderr, "\n");
-}
-
-// Progress bar helper (not thread-safe by itself; call under appropriate locks)
-static inline void mtp_progress_log(const MTP_SM_entry *e, int slot){
-    if(!e->progress_initialized || e->total_bytes <= 0) return;
-    double pct = (e->sent_bytes <= 0) ? 0.0 : (double)e->sent_bytes * 100.0 / (double)e->total_bytes;
-    if(pct > 100.0) pct = 100.0; // clamp
-    const int barw = 30;
-    int fill = (int)(pct/100.0 * barw);
-    if(fill > barw) fill = barw;
-    char bar[barw+1];
-    for(int i=0;i<barw;i++) bar[i] = (i<fill)?'#':'-';
-    bar[barw] = '\0';
-    // ETA estimation
-    struct timespec now; clock_gettime(CLOCK_MONOTONIC, &now);
-    double elapsed = (now.tv_sec - e->start_time.tv_sec) + (now.tv_nsec - e->start_time.tv_nsec)/1e9;
-    double eta = 0.0;
-    if(e->sent_bytes > 0 && elapsed > 0.0){
-        double rate = (double)e->sent_bytes / elapsed; // bytes per sec
-        if(rate > 0.0){
-            eta = (double)(e->total_bytes - e->sent_bytes) / rate;
-        }
-    }
-    int eta_min = (int)(eta/60.0);
-    int eta_sec = (int)eta - eta_min*60;
-    double kbps = (elapsed>0 && e->sent_bytes>0) ? ((double)e->sent_bytes/1024.0)/elapsed : 0.0;
-    MTP_LOG_PROGRESS("slot=%d %6.2f%% [%s] %ld/%ldB eta=%02d:%02d thr=%0.2fKB/s rtx=%ld", slot, pct, bar, e->sent_bytes, e->total_bytes, eta_min, eta_sec, kbps, e->retransmissions);
 }
 
 // ------------------- API Functions -------------------
