@@ -1,6 +1,6 @@
 # MTCP (Message oriented TCP over UDP)
 
-A minimal reliable message transfer layer built on top of UDP. It implements a sliding window, cumulative acknowledgments, basic loss handling (with simulated drop probability), shared-memory based socket table, and automatic garbage collection of orphaned sockets.
+A minimal reliable message oriented transfer layer built on top of UDP. It implements a sliding window, cumulative acknowledgments, basic loss handling (with simulated drop probability), shared-memory based socket table, and automatic garbage collection of orphaned sockets.
 
 > Educational project: not production-hardened. Focus is clarity of mechanisms (windowing, ordering, retransmission) rather than performance or full RFC compliance.
 
@@ -66,20 +66,19 @@ A minimal reliable message transfer layer built on top of UDP. It implements a s
 ```
 make -f makefile.mak init   # builds the library/object files (adjust target if needed)
 ```
-OR manually:
-```
-gcc -Wall -Wextra -pthread -c msocket.c
-gcc -Wall -Wextra -pthread -c initmsocket.c
-```
+
 You typically run the `initmsocket` executable first (if you have a separate runner; otherwise integrate its logic into your launch scripts).
 
 ### Running Example (Two Terminals)
-1. Terminal A – start the manager & sender:
+1. Terminal A – start the manager:
 ```
 ./initmsocket   # if compiled as standalone; otherwise ensure it is running somehow
+```
+2. Terminal B – start the sender:
+```
 ./user1 127.0.0.1 5001 127.0.0.1 5002 large_file.txt
 ```
-2. Terminal B – start the receiver:
+4. Terminal C – start the receiver:
 ```
 ./user2 127.0.0.1 5002 127.0.0.1 5001
 ```
