@@ -19,6 +19,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#include <signal.h>   
 
 
 void print_fdset(fd_set *set, int maxfd) {
@@ -110,7 +111,7 @@ int main(){
         g_sm->sm_entry[i].receiver.next_val = 0;
     }
     
-    pthread_t tid_R, tid_S;
+    pthread_t tid_R, tid_S, tid_GC;
 
     if (pthread_create(&tid_R, NULL, receiver_thread, NULL) != 0) {
         perror("Failed to create receiver thread");
@@ -119,6 +120,10 @@ int main(){
 
     if (pthread_create(&tid_S, NULL, sender_thread, NULL) != 0) {
         perror("Failed to create sender thread");
+        exit(1);
+    }
+    if (pthread_create(&tid_GC, NULL, garbage_collector_thread, NULL) != 0) {
+        perror("Failed to create garbage collector thread");
         exit(1);
     }
     while(1){
@@ -158,6 +163,10 @@ int main(){
         perror("Failed to join receiver thread");
         exit(1);
     }
+    if (pthread_join(tid_GC, NULL) != 0) {
+        perror("Failed to join garbage collector thread");
+        exit(1);
+    }
     return 0;
 }
 
@@ -176,7 +185,6 @@ void* receiver_thread(void *arg) {
         fd_set rfds;
         FD_ZERO(&rfds);
         int maxfd = -1;
-        printf("====================================================\n");
         for (int i = 0; i < MAX_SOCKETS; ++i) {
             pthread_mutex_lock(&g_sm->sm_entry[i].lock);
             if (!g_sm->sm_entry[i].free_slot){
@@ -203,7 +211,6 @@ void* receiver_thread(void *arg) {
             printf("Timeout occurred! No data after %d seconds.\n", TIME_SEC);
             continue;
         }
-        printf("IN RECEIVER THREAD\n");
         for (int i = 0; i < MAX_SOCKETS; ++i) {
             // Lock briefly to check slot and fetch fd
             pthread_mutex_lock(&g_sm->sm_entry[i].lock);
@@ -215,10 +222,7 @@ void* receiver_thread(void *arg) {
             struct sockaddr_in dest_copy = g_sm->sm_entry[i].dest_addr;
             pthread_mutex_unlock(&g_sm->sm_entry[i].lock);
 
-            printf("-----------------------------------------------------------------------------\n");
-            printf("IN RECEIVER THREAD here for socket %d\n", i);
             if (FD_ISSET(fd, &rfds)) {
-                printf("ENTERED THE ZONE FOR SOCKET %d\n", i);
                 // Drain all available datagrams without blocking
                 while (1) {
                     MTP_Message buf;
@@ -236,12 +240,10 @@ void* receiver_thread(void *arg) {
                     }
 
                     if (dropMessage(DROP_PROB) == 1) {
-                        printf(">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>> \n");
                         printf("MESSAGE DROPPED %d, ACK %s\n", buf.seq_num, buf.is_ack ? "true" : "false");
-                        printf("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n");
                         continue; // simulate drop, do not process further
                     }
-
+                    printf("Received message with seq_num: %d, is_ack: %s from %s\n", buf.seq_num, buf.is_ack ? "true" : "false", inet_ntoa(from.sin_addr));
                     if (!buf.is_ack) {
                         // Process data message
                         int diff;
@@ -267,14 +269,6 @@ void* receiver_thread(void *arg) {
                         }
 
                         next_val_required = g_sm->r_ack[i];
-                        printf("\n");
-                        printf("G_SM R_ACK: %d\n", g_sm->r_ack[i]);
-                        printf("\n\n");
-                        printf("RECEIVER BUFFER _2343 : ");
-                        for (int kk = 0; kk < RECV_BUFFER; kk++) {
-                            printf("%d ", g_sm->sm_entry[i].receiver.buffer[kk].seq_num);
-                        }
-                        printf("\n\n");
 
                         if (!duplicate_present) {
                             if (count_buffer(i, 1) == 0) {
@@ -297,12 +291,6 @@ void* receiver_thread(void *arg) {
                             }
                         }
 
-                        printf("\n");
-                        printf("RECEIVER BUFFER: ");
-                        for (int kk = 0; kk < RECV_BUFFER; kk++) {
-                            printf("%d ", g_sm->sm_entry[i].receiver.buffer[kk].seq_num);
-                        }
-                        printf("\n\n");
 
                         if (g_sm->sm_entry[i].receiver.buffer[0].seq_num == g_sm->r_ack[i]) {
                             for (int p = 0; p < RECV_BUFFER; p++) {
@@ -337,7 +325,7 @@ void* receiver_thread(void *arg) {
                         // HANDLE ACK MESSAGES
                         pthread_mutex_lock(&g_sm->sm_entry[i].lock);
                         MTP_Message msg = buf;
-                        printf("In ack handling, next val %d %d %d\n", msg.next_val, msg.seq_num, g_sm->sm_entry[i].sender.swnd_count);
+                        printf("Received acknowledgement with next seq required as: %d from %s\n", msg.next_val, inet_ntoa(from.sin_addr));
                         for (int j = 0; j < SENDER_SWND; j++) {
                             if (g_sm->sm_entry[i].sender.swnd[j].seq_num != -1 &&
                                 seq_num_finder(g_sm->sm_entry[i].sender.swnd[j].seq_num, msg.next_val) >= SENDER_SWND &&
@@ -348,10 +336,6 @@ void* receiver_thread(void *arg) {
                             }
                         }
                         order(g_sm->sm_entry[i].sender.swnd, SENDER_SWND);
-                        for (int j = 0; j < SENDER_SWND; j++) {
-                            printf("%d ", g_sm->sm_entry[i].sender.swnd[j].seq_num);
-                        }
-                        printf("\n");
                         pthread_mutex_unlock(&g_sm->sm_entry[i].lock);
                     }
                 }
@@ -371,7 +355,6 @@ void* sender_thread(void *arg) {
    
     while (1) {
         sleep(T);     
-        printf("IN SENDER THREAD\n");
         for (int i = 0; i < MAX_SOCKETS; ++i) {
             pthread_mutex_lock(&g_sm->sm_entry[i].lock);
 
@@ -382,18 +365,6 @@ void* sender_thread(void *arg) {
                 pthread_mutex_unlock(&g_sm->sm_entry[i].lock);
                 continue;
             }
-            printf("SENDER BUFFER before changing swnd with socket idx %d: ", i);
-            for(int k=0;k<SENDER_BUFFER;k++){
-                    printf("%d ", g_sm->sm_entry[i].sender.buffer[k].seq_num);
-            }
-            printf("\n");
-            printf("\n");
-            printf("SENDER WINDOW before changing swnd with socket idx %d: ", i);
-            for(int k=0;k<SENDER_SWND;k++){
-                printf("%d ", g_sm->sm_entry[i].sender.swnd[k].seq_num);
-            }
-            printf("\n");
-            printf("\n");
             for (int j = 0; j < SENDER_SWND; ++j) {
                 if (g_sm->sm_entry[i].sender.swnd[j].sent_time.tv_sec  != default_time.tv_sec || g_sm->sm_entry[i].sender.swnd[j].sent_time.tv_nsec != default_time.tv_nsec) {
                     // Handle retransmission
@@ -405,28 +376,14 @@ void* sender_thread(void *arg) {
                     if(elapsed >= T) {
                         sendto(g_sm->sm_entry[i].sock.udp_sockfd, &g_sm->sm_entry[i].sender.swnd[j], sizeof(MTP_Message), 0, (struct sockaddr *)&g_sm->sm_entry[i].dest_addr, sizeof(g_sm->sm_entry[i].dest_addr));
                         g_sm->sm_entry[i].sender.swnd[j].sent_time = now; 
-                        printf("retransmitting %d\n", g_sm->sm_entry[i].sender.swnd[j].seq_num);
-
-                        // retransmit = 1;
-                        // break;
+                        printf("Retransmitting %d\n", g_sm->sm_entry[i].sender.swnd[j].seq_num);
                     }
                 }
             }
             printf("\n");
-            // if(retransmit) {
-            //     // Retransmit packet
-            //     for (int j=0; j<SENDER_SWND; j++) {
-            //         // Go-back-N retransmission
-            //         if (g_sm->sm_entry[i].sender.swnd[j].sent_time.tv_sec  != default_time.tv_sec || g_sm->sm_entry[i].sender.swnd[j].sent_time.tv_nsec != default_time.tv_nsec) {
-            //             sendto(g_sm->sm_entry[i].sock.udp_sockfd, &g_sm->sm_entry[i].sender.swnd[j], sizeof(MTP_Message), 0, (struct sockaddr *)&g_sm->sm_entry[i].dest_addr, sizeof(g_sm->sm_entry[i].dest_addr));
-            //             g_sm->sm_entry[i].sender.swnd[j].sent_time = now; // Update sent time
-            //         }
-            //     }
-            //     printf("retransmitting \n");
-            // }
+           
             int j = g_sm->sm_entry[i].sender.swnd_count;
             pthread_mutex_unlock(&g_sm->sm_entry[i].lock);
-            printf("UNLOCKEDDDDD with SWND COUNT %d\n \n \n \n", g_sm->sm_entry[i].sender.swnd_count);
             
             while(j<SENDER_SWND && count_buffer(i, 0)>0) {
                 // Send new packet
@@ -452,25 +409,12 @@ void* sender_thread(void *arg) {
                 
                     g_sm->sm_entry[i].sender.swnd[j] = buf;
                     g_sm->sm_entry[i].sender.swnd_count++;
-                    // printf("Sender window first entry: %d\n", g_sm->sm_entry[i].sender.buffer[0].seq_num);
-                    // printf("Sending new packet %d New sender window: %d\n", g_sm->sm_entry[i].sender.swnd[j].seq_num, g_sm->sm_entry[i].sender.swnd_count);
                     sendto(g_sm->sm_entry[i].sock.udp_sockfd, &g_sm->sm_entry[i].sender.swnd[j], sizeof(MTP_Message), 0, (struct sockaddr *)&g_sm->sm_entry[i].dest_addr, sizeof(g_sm->sm_entry[i].dest_addr));
+                    printf("Sending new packet %d\n", g_sm->sm_entry[i].sender.swnd[j].seq_num);
                 }
                 j++;
                 pthread_mutex_unlock(&g_sm->sm_entry[i].lock);
             }
-            printf("SENDER BUFFER: ");
-            for(int k=0;k<SENDER_BUFFER;k++){
-                    printf("%d ", g_sm->sm_entry[i].sender.buffer[k].seq_num);
-            }
-            printf("\n");
-            printf("\n");
-            printf("SENDER WINDOW: ");
-            for(int k=0;k<SENDER_SWND;k++){
-                printf("%d ", g_sm->sm_entry[i].sender.swnd[k].seq_num);
-            }
-            printf("\n");
-            printf("\n");
             pthread_mutex_unlock(&g_sm->sm_entry[i].lock);
         }
     }
@@ -479,12 +423,50 @@ void* sender_thread(void *arg) {
 
 void* garbage_collector_thread(void *arg) {
     printf("Garbage collector thread started\n");
-    // loop: clean up old sockets, free memory
+    MTP_SM *g_sm = finder(SHM_KEY);
+    if (g_sm == NULL) {
+        perror("Failed to find shared memory in GC");
+        return NULL;
+    }
+
     while (1) {
-        // check for closed sockets, free resources
-        sleep(5); // simulate work
+        sleep(3); // GC interval
+        for (int i = 0; i < MAX_SOCKETS; i++) {
+            pthread_mutex_lock(&g_sm->sm_entry[i].lock);
+            if (!g_sm->sm_entry[i].free_slot) {
+                pid_t owner = g_sm->sm_entry[i].pid_creation;
+                int fd = g_sm->sm_entry[i].sock.udp_sockfd;
+                if (owner > 0) {
+                    if (kill(owner, 0) == -1 && errno == ESRCH) {
+                        printf("[GC] Reclaiming orphaned socket idx=%d (pid=%d) fd=%d\n", i, owner, fd);
+                        if (fd >= 0) close(fd);
+                        g_sm->sm_entry[i].sock.udp_sockfd = -1;
+                        g_sm->sm_entry[i].free_slot = true;
+                        g_sm->sm_entry[i].pid_creation = -1;
+                        g_sm->sm_entry[i].src_addr = (struct sockaddr_in){0};
+                        g_sm->sm_entry[i].dest_addr = (struct sockaddr_in){0};
+                        // Clear sender buffers
+                        for (int k = 0; k < SENDER_BUFFER; k++) {
+                            initializer_message(&g_sm->sm_entry[i].sender.buffer[k], false);
+                        }
+                        for (int k = 0; k < SENDER_SWND; k++) {
+                            initializer_message(&g_sm->sm_entry[i].sender.swnd[k], false);
+                        }
+                        g_sm->sm_entry[i].sender.swnd_count = 0;
+                        // Clear receiver buffers
+                        for (int k = 0; k < RECV_BUFFER; k++) {
+                            initializer_message(&g_sm->sm_entry[i].receiver.buffer[k], false);
+                        }
+                        memset(g_sm->sm_entry[i].receiver.whether_taken, 0, sizeof(g_sm->sm_entry[i].receiver.whether_taken));
+                        g_sm->sm_entry[i].receiver.rwnd_count = 0;
+                        g_sm->sm_entry[i].receiver.next_val = 0;
+                        g_sm->r_ack[i] = 0; // reset expected ack for this slot
+                    }
+                }
+            }
+            pthread_mutex_unlock(&g_sm->sm_entry[i].lock);
+        }
     }
     return NULL;
 }
-
 

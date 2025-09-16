@@ -18,7 +18,7 @@
 #define RECV_SWND 5             // receiver sliding window size
 #define SOCK_MTP 12345          // MTP socket type
 #define T 5                     // Timeout duration in seconds
-#define DROP_PROB 0.2           // Packet drop probability
+#define DROP_PROB 0.3           // Packet drop probability
 #define TIME_SEC 5              // Timeout duration in seconds
 #define TIME_USEC 0             // Timeout duration in microseconds
 #define MAX_NODES 1024
