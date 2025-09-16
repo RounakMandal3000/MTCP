@@ -7,6 +7,25 @@
 #include <sys/types.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <stdio.h>   // for fprintf, stderr in logging helpers
+#include <time.h>     // for struct timespec, clock_gettime
+
+// Fallback for environments lacking CLOCK_MONOTONIC (e.g., some MinGW variants)
+#ifndef CLOCK_MONOTONIC
+#define CLOCK_MONOTONIC 1
+#endif
+
+#if defined(_WIN32) && !defined(__MINGW32__)
+// Simple emulation using clock() (low resolution). For real high-res use QueryPerformanceCounter.
+static inline int mtp_clock_gettime_fake(int clk_id, struct timespec *ts){
+    (void)clk_id;
+    clock_t c = clock();
+    ts->tv_sec = c / CLOCKS_PER_SEC;
+    ts->tv_nsec = (long)((c % CLOCKS_PER_SEC) * (1000000000L / CLOCKS_PER_SEC));
+    return 0;
+}
+#define clock_gettime(a,b) mtp_clock_gettime_fake(a,b)
+#endif
 #define MTP_MSG_SIZE   1024     // 1 KB fixed message size
 #define SEQ_BITS       4        // 4-bit sequence number
 #define MAX_SEQ_NUM    (1 << SEQ_BITS) // 16 unique seq numbers
@@ -22,7 +41,7 @@
 #define TIME_SEC 5              // Timeout duration in seconds
 #define TIME_USEC 0             // Timeout duration in microseconds
 #define MAX_NODES 1024
-#define SHM_KEY 0x2433           // Shared memory key for inter-process communication
+#define SHM_KEY 0x2434          // Shared memory key for inter-process communication
 
 #define ENOBUFS 105  // No buffer space available error code
 #define ENOTBOUND 106 // Socket is not bound error code
@@ -61,10 +80,6 @@ typedef struct {
 } PIDQueue;
 
 
-// typedef struct RecvNode {
-//     MTP_Message msg;
-//     struct RecvNode *next;
-// } Node;
 typedef struct RecvNode {
     MTP_Message msg;
     size_t next;   
@@ -81,11 +96,7 @@ typedef struct {
     int used;
     Node node;
 } NodeSlot;
-// typedef struct {
-//     Node *front;  // head of queue
-//     Node *rear;   // tail of queue
-//     int count;       // number of elements
-// } MTP_Queue;
+
 typedef struct {
     size_t front;  
     size_t rear;   
@@ -120,6 +131,13 @@ typedef struct{
     MTP_Sender sender;
     MTP_Receiver receiver;
     int to_bind;
+    // --- Progress / stats ---
+    long total_bytes;              // total payload bytes intended to send (sender side)
+    long sent_bytes;               // bytes enqueued/sent (approx)
+    long retransmissions;          // count of retransmissions
+    long last_progress_bytes;      // last bytes value when we logged progress
+    struct timespec start_time;    // when first progress initialized
+    int progress_initialized;      // flag: 1 if total_bytes set
 } MTP_SM_entry;
 
 
@@ -131,6 +149,92 @@ typedef struct{
     int bind_socket;
     int r_ack[MAX_NODES];
 } MTP_SM;
+
+// ------------------- Logging Utilities -------------------
+#ifndef MTP_NO_COLOR
+#define MTP_CLR_RESET   "\x1b[0m"
+#define MTP_CLR_DIM     "\x1b[2m"
+#define MTP_CLR_RED     "\x1b[31m"
+#define MTP_CLR_GREEN   "\x1b[32m"
+#define MTP_CLR_YELLOW  "\x1b[33m"
+#define MTP_CLR_BLUE    "\x1b[34m"
+#define MTP_CLR_MAGENTA "\x1b[35m"
+#define MTP_CLR_CYAN    "\x1b[36m"
+#define MTP_CLR_BOLD    "\x1b[1m"
+#else
+#define MTP_CLR_RESET   ""
+#define MTP_CLR_DIM     ""
+#define MTP_CLR_RED     ""
+#define MTP_CLR_GREEN   ""
+#define MTP_CLR_YELLOW  ""
+#define MTP_CLR_BLUE    ""
+#define MTP_CLR_MAGENTA ""
+#define MTP_CLR_CYAN    ""
+#define MTP_CLR_BOLD    ""
+#endif
+
+#define MTP_TAG(tag,color) MTP_CLR_BOLD color tag MTP_CLR_RESET
+
+#define MTP_LOG_INFO(fmt, ...)  fprintf(stderr, MTP_TAG("[INFO] ", MTP_CLR_CYAN) fmt "%s", ##__VA_ARGS__, "\n")
+#define MTP_LOG_WARN(fmt, ...)  fprintf(stderr, MTP_TAG("[WARN] ", MTP_CLR_YELLOW) fmt "%s", ##__VA_ARGS__, "\n")
+#define MTP_LOG_ERR(fmt, ...)   fprintf(stderr, MTP_TAG("[ERR ] ", MTP_CLR_RED) fmt "%s", ##__VA_ARGS__, "\n")
+#define MTP_LOG_DEBUG(fmt, ...) fprintf(stderr, MTP_TAG("[DBG ] ", MTP_CLR_DIM) fmt "%s", ##__VA_ARGS__, "\n")
+#define MTP_LOG_PROGRESS(fmt, ...) fprintf(stderr, MTP_TAG("[PROG] ", MTP_CLR_GREEN) fmt "%s", ##__VA_ARGS__, "\n")
+
+// Compact window snapshot helpers (implemented inline for header-only ease)
+static inline void mtp_print_window_sender(const MTP_Sender *s){
+    fprintf(stderr, MTP_TAG("[SWND] ", MTP_CLR_GREEN));
+    for(int i=0;i<SENDER_SWND;i++){
+        int sn = s->swnd[i].seq_num;
+        if(sn==-1) fprintf(stderr, " __"); else fprintf(stderr, " %02d", sn);
+    }
+    fprintf(stderr, " | count=%d\n", s->swnd_count);
+}
+
+static inline void mtp_print_buffer_sender(const MTP_Sender *s){
+    fprintf(stderr, MTP_TAG("[SBUF] ", MTP_CLR_BLUE));
+    for(int i=0;i<SENDER_BUFFER;i++){
+        int sn = s->buffer[i].seq_num;
+        if(sn==-1) fprintf(stderr, " __"); else fprintf(stderr, " %02d", sn);
+    }
+    fprintf(stderr, "\n");
+}
+
+static inline void mtp_print_buffer_receiver(const MTP_Receiver *r){
+    fprintf(stderr, MTP_TAG("[RBUF] ", MTP_CLR_MAGENTA));
+    for(int i=0;i<RECV_BUFFER;i++){
+        int sn = r->buffer[i].seq_num;
+        if(sn==-1) fprintf(stderr, " __"); else fprintf(stderr, " %02d", sn);
+    }
+    fprintf(stderr, "\n");
+}
+
+// Progress bar helper (not thread-safe by itself; call under appropriate locks)
+static inline void mtp_progress_log(const MTP_SM_entry *e, int slot){
+    if(!e->progress_initialized || e->total_bytes <= 0) return;
+    double pct = (e->sent_bytes <= 0) ? 0.0 : (double)e->sent_bytes * 100.0 / (double)e->total_bytes;
+    if(pct > 100.0) pct = 100.0; // clamp
+    const int barw = 30;
+    int fill = (int)(pct/100.0 * barw);
+    if(fill > barw) fill = barw;
+    char bar[barw+1];
+    for(int i=0;i<barw;i++) bar[i] = (i<fill)?'#':'-';
+    bar[barw] = '\0';
+    // ETA estimation
+    struct timespec now; clock_gettime(CLOCK_MONOTONIC, &now);
+    double elapsed = (now.tv_sec - e->start_time.tv_sec) + (now.tv_nsec - e->start_time.tv_nsec)/1e9;
+    double eta = 0.0;
+    if(e->sent_bytes > 0 && elapsed > 0.0){
+        double rate = (double)e->sent_bytes / elapsed; // bytes per sec
+        if(rate > 0.0){
+            eta = (double)(e->total_bytes - e->sent_bytes) / rate;
+        }
+    }
+    int eta_min = (int)(eta/60.0);
+    int eta_sec = (int)eta - eta_min*60;
+    double kbps = (elapsed>0 && e->sent_bytes>0) ? ((double)e->sent_bytes/1024.0)/elapsed : 0.0;
+    MTP_LOG_PROGRESS("slot=%d %6.2f%% [%s] %ld/%ldB eta=%02d:%02d thr=%0.2fKB/s rtx=%ld", slot, pct, bar, e->sent_bytes, e->total_bytes, eta_min, eta_sec, kbps, e->retransmissions);
+}
 
 // ------------------- API Functions -------------------
 
@@ -155,62 +259,8 @@ void print_queue(int socket_id, int flag);
 void initializer_message(MTP_Message* msg, bool is_ack);
 void order(MTP_Message arr[], int n);
 
-// void initQueue_pid(PIDQueue *q);
-// int is_Empty_pid(PIDQueue *q);
-// void enqueue_pid(PIDQueue *q, pid_t pid, char* filename);
-// Node_pid dequeue_pid(PIDQueue *q);
-
 #endif // M_SOCKET_H
 
 
 
 
-//  // Processing for Acknowledgment
-//                         MTP_Message *ack_back = malloc(sizeof(MTP_Message));
-//                         initializer_message(ack_back, true);
-//                         int cnt = 0;
-//                         for(int j=0; j < g_sm->sm_entry[i].receiver->rwnd_count; j++) {
-//                             if (g_sm->sm_entry[i].receiver->rwnd[j].seq_num == buf->seq_num) {
-//                                 cnt = -1;
-//                                 break;
-//                             }
-//                         }
-                        
-
-//                         if(cnt!=-1){        //NOT DUPLICATE MESSAGE
-//                             g_sm->sm_entry[i].receiver->rwnd_count++;
-//                             g_sm->sm_entry[i].receiver->rwnd[g_sm->sm_entry[i].receiver->rwnd_count].seq_num = buf->seq_num;
-//                             g_sm->sm_entry[i].receiver->rwnd_count++;
-//                             int j_ = g_sm->sm_entry[i].receiver->rwnd_count - 1;
-//                             for(int j=g_sm->sm_entry[i].receiver->rwnd_count-2; j >= 0; j--) {
-//                                 if (g_sm->sm_entry[i].receiver->rwnd[j].seq_num > buf->seq_num) {
-//                                     swap(g_sm->sm_entry[i].receiver->rwnd[j], g_sm->sm_entry[i].receiver->rwnd[j+1]);
-//                                     j_ = j;
-//                                 }
-//                             }
-//                             if(j_==0 || g_sm->sm_entry[i].receiver->rwnd[j_] == g_sm->sm_entry[i].receiver->rwnd[j_-1]) cnt = 1;
-//                         } 
-//                         else{              //DUPLICATE MESSAGE
-
-//                         }
-//                         ack_back.is_ack = true;
-//                         if(cnt > 0)  ack_back.seq_num = buf->seq_num;
-//                         else{
-//                             ack_back.seq_num = 0;
-//                             for(int j=1;j<g_sm->sm_entry[i].receiver->rwnd_count;j++){
-//                                 if(g_sm->sm_entry[i].receiver->rwnd[j].seq_num == g_sm->sm_entry[i].receiver->rwnd[j-1].seq_num + 1) ack_back.seq_num = g_sm->sm_entry[i].receiver->rwnd[j].seq_num;
-//                                 else break;
-//                             }
-//                         }
-//                         ack_back.wnd_sz = g_sm->sm_entry[i].receiver->rwnd_count;
-//                         pthread_mutex_unlock(&g_sm->sm_entry[i].lock);
-//                         int m = m_sendto(g_sm->sm_entry[i].sock->udp_sockfd, &ack_back, sizeof(MTP_Message), 0, (struct sockaddr *)&g_sm->sm_entry[i].sock->dest_addr, sizeof(g_sm->sm_entry[i].sock->dest_addr));
-//                         pthread_mutex_lock(&g_sm->sm_entry[i].lock);
-//                         if (m < 0) {
-//                             perror("sendto failed");
-//                             pthread_mutex_unlock(&g_sm->sm_entry[i].lock);
-//                             continue;
-//                         }
-
-//                         pthread_mutex_unlock(&g_sm->sm_entry[i].lock);
-//                         printf("Received packet from %s:%d\n", inet_ntoa(from.sin_addr), ntohs(from.sin_port));

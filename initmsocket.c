@@ -59,13 +59,13 @@ int main(){
     MTP_SM *g_sm;
     shmid = shmget(SHM_KEY, sizeof(MTP_SM), 0777 | IPC_CREAT);
     if (shmid < 0) {
-        perror("shmget failed");
+        MTP_LOG_ERR("shmget failed: %s", strerror(errno));
         exit(1);
     }
 
     g_sm = (MTP_SM *)shmat(shmid, NULL, 0);
     if (g_sm == (MTP_SM *)-1) {
-        perror("shmat failed");
+        MTP_LOG_ERR("shmat failed: %s", strerror(errno));
         exit(1);
     }
     g_sm->bind_socket = -1;
@@ -109,21 +109,27 @@ int main(){
         memset(g_sm->sm_entry[i].receiver.whether_taken, 0, sizeof(g_sm->sm_entry[i].receiver.whether_taken));
         g_sm->sm_entry[i].receiver.rwnd_count = 0;
         g_sm->sm_entry[i].receiver.next_val = 0;
+        g_sm->sm_entry[i].total_bytes = 0;
+        g_sm->sm_entry[i].sent_bytes = 0;
+        g_sm->sm_entry[i].retransmissions = 0;
+        g_sm->sm_entry[i].last_progress_bytes = 0;
+        g_sm->sm_entry[i].progress_initialized = 0;
+        g_sm->sm_entry[i].start_time = default_time;
     }
     
     pthread_t tid_R, tid_S, tid_GC;
 
     if (pthread_create(&tid_R, NULL, receiver_thread, NULL) != 0) {
-        perror("Failed to create receiver thread");
+        MTP_LOG_ERR("Failed to create receiver thread: %s", strerror(errno));
         exit(1);
     }
 
     if (pthread_create(&tid_S, NULL, sender_thread, NULL) != 0) {
-        perror("Failed to create sender thread");
+        MTP_LOG_ERR("Failed to create sender thread: %s", strerror(errno));
         exit(1);
     }
     if (pthread_create(&tid_GC, NULL, garbage_collector_thread, NULL) != 0) {
-        perror("Failed to create garbage collector thread");
+        MTP_LOG_ERR("Failed to create garbage collector thread: %s", strerror(errno));
         exit(1);
     }
     while(1){
@@ -144,7 +150,7 @@ int main(){
                 if(!g_sm->sm_entry[i].free_slot && g_sm->sm_entry[i].to_bind == 1 ){
                     struct sockaddr_in server_addr = g_sm->sm_entry[i].src_addr;
                     if(bind(g_sm->sm_entry[i].sock.udp_sockfd, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0){
-                        perror("Failed to bind socket");
+                        MTP_LOG_ERR("bind failed slot=%d: %s", i, strerror(errno));
                         close(g_sm->sm_entry[i].sock.udp_sockfd);
                         pthread_mutex_unlock(&g_sm->sm_entry[i].lock);
                     }
@@ -156,15 +162,15 @@ int main(){
         sleep(1);
     }
     if (pthread_join(tid_S, NULL) != 0) {
-        perror("Failed to join sender thread");
+    MTP_LOG_ERR("Failed to join sender thread: %s", strerror(errno));
         exit(1);
     }
     if (pthread_join(tid_R, NULL) != 0) {
-        perror("Failed to join receiver thread");
+    MTP_LOG_ERR("Failed to join receiver thread: %s", strerror(errno));
         exit(1);
     }
     if (pthread_join(tid_GC, NULL) != 0) {
-        perror("Failed to join garbage collector thread");
+    MTP_LOG_ERR("Failed to join garbage collector thread: %s", strerror(errno));
         exit(1);
     }
     return 0;
@@ -173,7 +179,7 @@ int main(){
 
 
 void* receiver_thread(void *arg) {
-    printf("Receiver thread started\n");
+    MTP_LOG_INFO("receiver thread started");
     MTP_SM *g_sm = finder(SHM_KEY);
     if (g_sm == NULL) {
         perror("Failed to find shared memory");
@@ -204,11 +210,11 @@ void* receiver_thread(void *arg) {
         tv.tv_usec = 5;
         int rv = select(maxfd+1, &rfds, NULL, NULL, &tv);
         if (rv < 0) {
-            perror("select failed");
+            MTP_LOG_ERR("select failed: %s", strerror(errno));
             continue;
         }
         else if (rv == 0) {           // WRITE THIS LATER, TIMEOUT CASE
-            printf("Timeout occurred! No data after %d seconds.\n", TIME_SEC);
+            MTP_LOG_DEBUG("rx select timeout %d s", TIME_SEC);
             continue;
         }
         for (int i = 0; i < MAX_SOCKETS; ++i) {
@@ -235,15 +241,15 @@ void* receiver_thread(void *arg) {
                             // No more data to read for this fd
                             break;
                         }
-                        perror("recvfrom failed");
+                        MTP_LOG_ERR("recvfrom failed: %s", strerror(errno));
                         break;
                     }
 
                     if (dropMessage(DROP_PROB) == 1) {
-                        printf("MESSAGE DROPPED %d, ACK %s\n", buf.seq_num, buf.is_ack ? "true" : "false");
+                        MTP_LOG_WARN("simulated drop seq=%d kind=%s", buf.seq_num, buf.is_ack?"ACK":"DATA");
                         continue; // simulate drop, do not process further
                     }
-                    printf("Received message with seq_num: %d, is_ack: %s from %s\n", buf.seq_num, buf.is_ack ? "true" : "false", inet_ntoa(from.sin_addr));
+                    MTP_LOG_DEBUG("rx %s seq=%d from=%s", buf.is_ack?"ACK":"DATA", buf.seq_num, inet_ntoa(from.sin_addr));
                     if (!buf.is_ack) {
                         // Process data message
                         int diff;
@@ -317,15 +323,15 @@ void* receiver_thread(void *arg) {
                         int mn = sendto(fd, &ack_back, sizeof(MTP_Message), 0,
                                         (struct sockaddr *)&dest_copy, sizeof(dest_copy));
                         if (mn < 0) {
-                            perror("sendto failed");
+                            MTP_LOG_ERR("sendto ack failed: %s", strerror(errno));
                             continue;
                         }
-                        printf("Sent acknowledgement with next seq required as: %d to %s\n", ack_back.next_val, inet_ntoa(dest_copy.sin_addr));
+                        MTP_LOG_INFO("sent ACK ack.next=%d ack.seq(for ref)=%d", ack_back.next_val, ack_back.seq_num);
                     } else {
                         // HANDLE ACK MESSAGES
                         pthread_mutex_lock(&g_sm->sm_entry[i].lock);
                         MTP_Message msg = buf;
-                        printf("Received acknowledgement with next seq required as: %d from %s\n", msg.next_val, inet_ntoa(from.sin_addr));
+                        MTP_LOG_DEBUG("rx ACK next=%d from=%s", msg.next_val, inet_ntoa(from.sin_addr));
                         for (int j = 0; j < SENDER_SWND; j++) {
                             if (g_sm->sm_entry[i].sender.swnd[j].seq_num != -1 &&
                                 seq_num_finder(g_sm->sm_entry[i].sender.swnd[j].seq_num, msg.next_val) >= SENDER_SWND &&
@@ -346,7 +352,7 @@ void* receiver_thread(void *arg) {
 }
 
 void* sender_thread(void *arg) {
-    printf("Sender thread started\n");
+    MTP_LOG_INFO("sender thread started");
     MTP_SM *g_sm = finder(SHM_KEY);
     if (g_sm == NULL) {
         perror("Failed to find shared memory");
@@ -376,7 +382,8 @@ void* sender_thread(void *arg) {
                     if(elapsed >= T) {
                         sendto(g_sm->sm_entry[i].sock.udp_sockfd, &g_sm->sm_entry[i].sender.swnd[j], sizeof(MTP_Message), 0, (struct sockaddr *)&g_sm->sm_entry[i].dest_addr, sizeof(g_sm->sm_entry[i].dest_addr));
                         g_sm->sm_entry[i].sender.swnd[j].sent_time = now; 
-                        printf("Retransmitting %d\n", g_sm->sm_entry[i].sender.swnd[j].seq_num);
+                        g_sm->sm_entry[i].retransmissions++;
+                        MTP_LOG_WARN("retransmit seq=%d slot=%d (rtx=%ld)", g_sm->sm_entry[i].sender.swnd[j].seq_num, i, g_sm->sm_entry[i].retransmissions);
                     }
                 }
             }
@@ -410,7 +417,12 @@ void* sender_thread(void *arg) {
                     g_sm->sm_entry[i].sender.swnd[j] = buf;
                     g_sm->sm_entry[i].sender.swnd_count++;
                     sendto(g_sm->sm_entry[i].sock.udp_sockfd, &g_sm->sm_entry[i].sender.swnd[j], sizeof(MTP_Message), 0, (struct sockaddr *)&g_sm->sm_entry[i].dest_addr, sizeof(g_sm->sm_entry[i].dest_addr));
-                    printf("Sending new packet %d\n", g_sm->sm_entry[i].sender.swnd[j].seq_num);
+                    MTP_LOG_INFO("tx new seq=%d slot=%d", g_sm->sm_entry[i].sender.swnd[j].seq_num, i);
+                    // lightweight progress heartbeat (no byte change, just show window status)
+                    if(g_sm->sm_entry[i].progress_initialized && (g_sm->sm_entry[i].sent_bytes - g_sm->sm_entry[i].last_progress_bytes) >= 16*1024){
+                        g_sm->sm_entry[i].last_progress_bytes = g_sm->sm_entry[i].sent_bytes;
+                        mtp_progress_log(&g_sm->sm_entry[i], i);
+                    }
                 }
                 j++;
                 pthread_mutex_unlock(&g_sm->sm_entry[i].lock);
@@ -422,10 +434,10 @@ void* sender_thread(void *arg) {
 }
 
 void* garbage_collector_thread(void *arg) {
-    printf("Garbage collector thread started\n");
+    MTP_LOG_INFO("GC thread started");
     MTP_SM *g_sm = finder(SHM_KEY);
     if (g_sm == NULL) {
-        perror("Failed to find shared memory in GC");
+    MTP_LOG_ERR("GC cannot attach shared memory: %s", strerror(errno));
         return NULL;
     }
 
@@ -438,7 +450,7 @@ void* garbage_collector_thread(void *arg) {
                 int fd = g_sm->sm_entry[i].sock.udp_sockfd;
                 if (owner > 0) {
                     if (kill(owner, 0) == -1 && errno == ESRCH) {
-                        printf("[GC] Reclaiming orphaned socket idx=%d (pid=%d) fd=%d\n", i, owner, fd);
+                        MTP_LOG_WARN("GC reclaim slot=%d pid=%d fd=%d", i, owner, fd);
                         if (fd >= 0) close(fd);
                         g_sm->sm_entry[i].sock.udp_sockfd = -1;
                         g_sm->sm_entry[i].free_slot = true;

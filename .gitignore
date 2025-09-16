@@ -1,0 +1,66 @@
+# ---- Build artifacts (C/C++) ----
+*.o
+*.obj
+*.lo
+*.la
+*.a
+*.so
+*.so.*
+*.dll
+*.dylib
+*.exe
+*.out
+*.stackdump
+
+# ---- Dependency / cache ----
+*.pch
+*.gcno
+*.gcda
+*.gcov
+*.dSYM/
+
+# ---- Generated logs / traces ----
+*.log
+log/
+logs/
+
+# ---- Protocol runtime buffers ----
+receiver_buffer.txt
+sender_buffer.txt
+
+# ---- Temporary / scratch files ----
+*.tmp
+*.swp
+*.swo
+*~
+
+# ---- Editor / IDE ----
+.vscode/
+.idea/
+*.code-workspace
+
+# ---- OS / Misc ----
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# ---- Python helper scripts (if any) ----
+__pycache__/
+*.pyc
+
+# ---- Archives ----
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+
+# ---- WSL specific ----
+# (occasionally appears when mixing environments)
+*.lnk
+
+# ---- Coverage / test outputs (if added later) ----
+coverage/
+
+# ---- Ignore large sample file if not desired in repo ----
+# Uncomment if you want to exclude the sample payload file:
+# large_file.txt

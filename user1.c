@@ -14,7 +14,7 @@
 int main(int argc, char *argv[])
 {
     if (argc < 6){
-        printf("Usage: %s <ip1> <port1> <ip2> <port2> <filename_src>\n", argv[0]);
+        MTP_LOG_WARN("Usage: %s <ip1> <port1> <ip2> <port2> <filename_src>", argv[0]);
         exit(1);
     }
 
@@ -37,27 +37,27 @@ int main(int argc, char *argv[])
     dest_addr.sin_family = AF_INET;
     dest_addr.sin_port = htons(atoi(port2));
     inet_pton(AF_INET, ip2, &dest_addr.sin_addr);
-    printf("Creating MTP socket...\n");
+    MTP_LOG_INFO("creating MTP socket");
     int rv = m_socket(AF_INET, SOCK_MTP, 0);
     if (rv < 0) {
         perror("Error creating MTP socket");
         exit(1);
     }
     int sockfd = rv;
-    printf("BINDING MTP socket...\n");
+    MTP_LOG_INFO("binding MTP socket");
     rv = m_bind(rv, (struct sockaddr *)&src_addr, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
     if (rv < 0) {
         perror("Error binding MTP socket");
         exit(1);
     }
-    printf("MTP socket created successfully with fd: %d\n", sockfd);
-    printf("Finding file...\n");
+    MTP_LOG_INFO("socket ready fd=%d", sockfd);
+    MTP_LOG_INFO("opening file '%s'", filename_src);
     FILE *fp = fopen(filename_src, "r");
     if (fp == NULL) {
         perror("Error opening source file");
         exit(1);
     }
-    printf("Starting socket function...\n");
+    MTP_LOG_INFO("starting sender thread for file transfer");
     pthread_t sender_thread_;
     pthread_create(&sender_thread_, NULL, file_to_sender_thread, &sockfd);
     pthread_join(sender_thread_, NULL);

@@ -45,7 +45,7 @@ int m_socket(int domain, int type, int protocol){
             if(sm->sm_entry[i].free_slot){
                 sm->sm_entry[i].pid_creation = getpid();
                 sm->sm_entry[i].sock.udp_sockfd = -2;
-                printf("IDX: %d\n", i);
+                MTP_LOG_INFO("socket slot=%d reserved (pid=%d)", i, (int)sm->sm_entry[i].pid_creation);
                 pthread_mutex_lock(&sm->lock_sm);
                 sm->bind_socket = 0;
                 pthread_mutex_unlock(&sm->lock_sm);
@@ -56,7 +56,7 @@ int m_socket(int domain, int type, int protocol){
 
                 pthread_mutex_lock(&sm->sm_entry[i].lock);
                 if(sm->sm_entry[i].sock.udp_sockfd < 0){
-                    perror("socket creation failed");
+                    MTP_LOG_ERR("socket creation failed: %s", strerror(errno));
                     sm->sm_entry[i].free_slot = true;
                     sm->sm_entry[i].pid_creation = -1;
                     pthread_mutex_unlock(&sm->sm_entry[i].lock);
@@ -70,7 +70,7 @@ int m_socket(int domain, int type, int protocol){
 
                 sm->sm_entry[i].free_slot = false;
                 pthread_mutex_unlock(&sm->sm_entry[i].lock);
-                // pthread_mutex_unlock(&sm->lock_sm);
+                MTP_LOG_INFO("socket fd=%d created in slot=%d", sm->sm_entry[i].sock.udp_sockfd, i);
                 return sm->sm_entry[i].sock.udp_sockfd;
             }
 
@@ -120,7 +120,7 @@ int m_sendto(int sockfd, const void *msg, int len, unsigned int flags, const str
         pthread_mutex_lock(&sm->sm_entry[i].lock);
         if(memcmp(&sm->sm_entry[i].dest_addr, to, sizeof(struct sockaddr)) == 0){
             if (count_buffer(i, 0) == SENDER_BUFFER) {
-                printf("Sender buffer full\n");
+                MTP_LOG_WARN("send buffer full (slot=%d)", i);
                 errno = ENOBUFS;
                 pthread_mutex_unlock(&sm->sm_entry[i].lock);
                 return -1;
@@ -139,6 +139,7 @@ int m_sendto(int sockfd, const void *msg, int len, unsigned int flags, const str
                 return -1;
             }
             sm->sm_entry[i].free_slot = false;
+            mtp_print_buffer_sender(&sm->sm_entry[i].sender);
             pthread_mutex_unlock(&sm->sm_entry[i].lock);
             return 0;
         }
@@ -186,6 +187,7 @@ int m_recvfrom(int sockfd, void *buf, int len, unsigned int flags, struct sockad
             sm->sm_entry[i].receiver.buffer[RECV_BUFFER-1].seq_num = -1;
             sm->r_ack[i]++;
             sm->r_ack[i] %= MAX_SEQ_NUM;
+            MTP_LOG_DEBUG("recv deliver seq=%d next_expected=%d (slot=%d)", ((MTP_Message*)buf)->seq_num, sm->r_ack[i], i);
 
             if (rv < 0) {
                 errno = ENOBUFS;
@@ -217,7 +219,7 @@ int m_close(int sockfd) {
         return -1;
     }
     if (close(sm->sm_entry[i].sock.udp_sockfd) < 0) {
-        perror("close failed");
+    MTP_LOG_ERR("close failed fd=%d: %s", sm->sm_entry[i].sock.udp_sockfd, strerror(errno));
         pthread_mutex_unlock(&sm->sm_entry[i].lock);
         return -1;
     }
@@ -264,6 +266,10 @@ void* file_to_sender_thread(void* arg) {
         perror("Failed to open file");
         return NULL;
     }
+    // Determine file size for progress metrics
+    fseek(file, 0, SEEK_END);
+    long total_bytes = ftell(file);
+    fseek(file, 0, SEEK_SET);
     
     int cnt=0;
     char line[MTP_MSG_SIZE];
@@ -282,7 +288,17 @@ void* file_to_sender_thread(void* arg) {
         fclose(file);
         return NULL;
     }
-    printf("SENDER SOCKET IS %d\n", j_);
+    // Initialize progress counters if not yet
+    pthread_mutex_lock(&g_sm->sm_entry[j_].lock);
+    if(!g_sm->sm_entry[j_].progress_initialized){
+        g_sm->sm_entry[j_].total_bytes = total_bytes;
+        g_sm->sm_entry[j_].sent_bytes = 0;
+        clock_gettime(CLOCK_MONOTONIC, &g_sm->sm_entry[j_].start_time);
+        g_sm->sm_entry[j_].progress_initialized = 1;
+        MTP_LOG_INFO("progress init slot=%d total=%ldB", j_, total_bytes);
+    }
+    pthread_mutex_unlock(&g_sm->sm_entry[j_].lock);
+    MTP_LOG_INFO("file->sender thread started slot=%d fd=%d", j_, sockfd);
     while(true){
         sleep(1);
         int rv=0;
@@ -294,7 +310,7 @@ void* file_to_sender_thread(void* arg) {
                 strncpy(msg.data, line, sizeof(msg.data) - 1);
                 msg.data[sizeof(msg.data) - 1] = '\0';
                 msg.seq_num = i; // CHANGE THIS
-                printf("%d \n", msg.seq_num);
+                MTP_LOG_DEBUG("queue line seq=%d", msg.seq_num);
                 msg.is_ack = false; // Not an ACK
                 msg.wnd_sz= -1;
                 msg.next_val = -1;
@@ -306,18 +322,28 @@ void* file_to_sender_thread(void* arg) {
                 char filename[64] = "sender_buffer.txt";
                 FILE *file = fopen(filename, "a");
                 if (!file) {
-                    perror("Failed to open file for writing");
+                    MTP_LOG_ERR("cannot append sender_buffer.txt: %s", strerror(errno));
                     return NULL; 
                 }
                 fprintf(file, "%s\n", msg.data);
                 fclose(file);
+                // Progress update
+                pthread_mutex_lock(&g_sm->sm_entry[j_].lock);
+                if(g_sm->sm_entry[j_].progress_initialized){
+                    g_sm->sm_entry[j_].sent_bytes += (long)strnlen(msg.data, MTP_MSG_SIZE);
+                    if(g_sm->sm_entry[j_].sent_bytes - g_sm->sm_entry[j_].last_progress_bytes >= 32*1024 || g_sm->sm_entry[j_].sent_bytes >= g_sm->sm_entry[j_].total_bytes){
+                        g_sm->sm_entry[j_].last_progress_bytes = g_sm->sm_entry[j_].sent_bytes;
+                        mtp_progress_log(&g_sm->sm_entry[j_], j_);
+                    }
+                }
+                pthread_mutex_unlock(&g_sm->sm_entry[j_].lock);
             }
             if (rv < 0) {
-                perror("Failed to send_to message");
+                MTP_LOG_WARN("send attempt failed (slot=%d) will retry: %s", j_, strerror(errno));
                 sleep(2);
                 continue;
             }
-            printf("Sent message with SEQ NUM: %d\n", msg.seq_num);
+            MTP_LOG_INFO("sent seq=%d", msg.seq_num);
             i = (i+1)%MAX_SEQ_NUM;
             // sleep(3);
         }
@@ -360,7 +386,7 @@ void* receiver_to_file_thread(void* arg) {
                     break;
                 }
                 fprintf(file, "%s\n", buf.data);
-                printf("Successfully wrote to file %d\n", buf.seq_num);
+                            MTP_LOG_INFO("delivered seq=%d to file", buf.seq_num);
                 fflush(file);
             }
         }
