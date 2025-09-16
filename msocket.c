@@ -165,6 +165,9 @@ int m_recvfrom(int sockfd, void *buf, int len, unsigned int flags, struct sockad
                 return -1;
             }
             int rv = -1;
+            if(sm->sm_entry[i].receiver.buffer[0].seq_num != sm->r_ack[i]){
+                return rv;   
+            }
             printf("RECEIVER BUFFER BEFORE REMOVAL: ");
             for(int k=0;k<RECV_BUFFER;k++){
                 printf("%d ", sm->sm_entry[i].receiver.buffer[k].seq_num);
@@ -172,7 +175,7 @@ int m_recvfrom(int sockfd, void *buf, int len, unsigned int flags, struct sockad
             printf("\n");
             *(MTP_Message *) buf = sm->sm_entry[i].receiver.buffer[0];
             for(int k=0; k<RECV_BUFFER; k++){
-                if(sm->sm_entry[i].receiver.buffer[k].seq_num != -1){
+                if(sm->sm_entry[i].receiver.buffer[k].seq_num != -1 ){
                     rv = 1;
                     *(MTP_Message *)buf = sm->sm_entry[i].receiver.buffer[k];
                     sm->sm_entry[i].receiver.buffer[k].seq_num = -1; // Mark as dequeued
@@ -184,6 +187,7 @@ int m_recvfrom(int sockfd, void *buf, int len, unsigned int flags, struct sockad
             for(int k=1; k<RECV_BUFFER; k++){
                 sm->sm_entry[i].receiver.buffer[k-1] = sm->sm_entry[i].receiver.buffer[k];
             }
+            
             sm->sm_entry[i].receiver.buffer[RECV_BUFFER-1].seq_num = -1;
             sm->r_ack[i]++;
             sm->r_ack[i] %= MAX_SEQ_NUM;
@@ -289,11 +293,15 @@ void* file_to_sender_thread(void* arg) {
         fclose(file);
         return NULL;
     }
+    printf("SENDER SOCKET IS %d\n", j_);
     while(true){
+        sleep(1);
         int rv=0;
         MTP_Message msg;
         while (rv<0 || fgets(line, sizeof(line), file)) {
+            printf("hello ---- 1\n");
             pthread_mutex_lock(&g_sm->sm_entry[j_].lock);
+            printf("hello ---- 2\n");
             if(rv>=0){
                 msg = (MTP_Message){0};
                 strncpy(msg.data, line, sizeof(msg.data) - 1);
@@ -352,31 +360,36 @@ void* receiver_to_file_thread(void* arg) {
         
     while(true){
         // sleep(40);
-        sleep(3);
+        sleep(5);
         pthread_mutex_lock(&g_sm->sm_entry[j_].lock);
         MTP_Message buf;
         int addrlen = sizeof(g_sm->sm_entry[j_].dest_addr);
+        for(int j=0; j<RECV_BUFFER; j++){
+            printf("%d ", g_sm->sm_entry[j_].receiver.buffer[j].seq_num);
+        }
+        printf("\n");
+        printf("\n");
+        printf("R_ACK NOW: %d\n", g_sm->r_ack[j_]);
+        printf("\n");
         if(g_sm->sm_entry[j_].receiver.buffer[0].seq_num == g_sm->r_ack[j_]){
             for(int j=0; j<RECV_BUFFER; j++){
+
                 int rv = m_recvfrom(sockfd, (void *)&buf, sizeof(buf), 0, (struct sockaddr *)&g_sm->sm_entry[j_].dest_addr, &addrlen);
                 // printf("hello i am here now\n");
-
+                for(int jj=0; jj<RECV_BUFFER; jj++){
+                    printf("%d ", g_sm->sm_entry[j_].receiver.buffer[jj].seq_num);
+                }
                 if (rv < 0) {
                     perror("Failed to receive message");
-                    sleep(T/3);
                     break;
                 }
                 fprintf(file, "%s\n", buf.data);
                 printf("Successfully wrote to file %d\n", buf.seq_num);
                 fflush(file);
-                // sleep(40);
             }
-
         }
-        
-        // pthread_mutex_lock(&g_sm->sm_entry[j_].lock);
-        
         pthread_mutex_unlock(&g_sm->sm_entry[j_].lock);
+        // sleep(T);
     }
     fclose(file);
     return NULL;
@@ -402,4 +415,16 @@ int count_buffer(int socket_id, int flag){
 
     return cnt;
 
+}
+
+void order(MTP_Message arr[], int n) {
+    int idx = 0; 
+    for (int i = 0; i < n; i++) {
+        if (arr[i].seq_num != -1) {
+            arr[idx++] = arr[i];
+        }
+    }
+    while (idx < n) {
+        arr[idx++] = (MTP_Message){-1};
+    }
 }

@@ -18,7 +18,7 @@
 #define RECV_SWND 5             // receiver sliding window size
 #define SOCK_MTP 12345          // MTP socket type
 #define T 5                     // Timeout duration in seconds
-#define DROP_PROB 0.5           // Packet drop probability
+#define DROP_PROB 0.2           // Packet drop probability
 #define TIME_SEC 5              // Timeout duration in seconds
 #define TIME_USEC 0             // Timeout duration in microseconds
 #define MAX_NODES 1024
@@ -153,6 +153,7 @@ Node* get_node(void *base, int offset);
 void* base_finder(int shmid);
 void print_queue(int socket_id, int flag);
 void initializer_message(MTP_Message* msg, bool is_ack);
+void order(MTP_Message arr[], int n);
 
 // void initQueue_pid(PIDQueue *q);
 // int is_Empty_pid(PIDQueue *q);
