@@ -255,6 +255,7 @@ void* receiver_thread(void *arg) {
                         }
 
                         int next_val_required = g_sm->r_ack[i];
+                        // printf("ACK_BACK_____: %d\n", next_val_required);
                         // printf("SEQ NUM RECEIVED: %d \n", msg->seq_num);
                         if(!duplicate_present){
                             if(count_buffer(i, 1) == 0){
@@ -275,6 +276,7 @@ void* receiver_thread(void *arg) {
                                 }
                             }
                         }
+                        // printf("ACK_BACK_____: %d\n", next_val_required);
                         
                         // THIS PART IS FOR FINDING THE NEXT SEQ NUMBER REQUIRED
                         if(g_sm->sm_entry[i].receiver.buffer[0].seq_num == g_sm->r_ack[i]){
@@ -282,19 +284,25 @@ void* receiver_thread(void *arg) {
                                 if(g_sm->sm_entry[i].receiver.buffer[p].seq_num != -1){
                                     if(p+1 < RECV_BUFFER && g_sm->sm_entry[i].receiver.buffer[p+1].seq_num == -1) {
                                         next_val_required = (g_sm->sm_entry[i].receiver.buffer[p].seq_num+1)%MAX_SEQ_NUM;
+                                        // printf("ACK_BACK_____: %d\n", next_val_required);
+                                        
                                         break;
                                     }
                                     if(p+1 <RECV_BUFFER && g_sm->sm_entry[i].receiver.buffer[p+1].seq_num != (g_sm->sm_entry[i].receiver.buffer[p].seq_num+1)%MAX_SEQ_NUM){
                                         next_val_required = (g_sm->sm_entry[i].receiver.buffer[p].seq_num+1)%MAX_SEQ_NUM;
+                                        // printf("ACK_BACK_____: %d\n", next_val_required);
                                         break;
                                     }
                                     next_val_required = (g_sm->sm_entry[i].receiver.buffer[p].seq_num+1)%MAX_SEQ_NUM;
+                                    // printf("ACK_BACK_____: %d\n", next_val_required);
+
                                 }
                                 else break;
                             }
                         }
                         ack_back->next_val = next_val_required;
                         printf("ACK_BACK: %d\n", ack_back->next_val);
+
                         int mn = sendto(g_sm->sm_entry[i].sock.udp_sockfd, ack_back, sizeof(MTP_Message), 0, (struct sockaddr *)&g_sm->sm_entry[i].dest_addr, sizeof(g_sm->sm_entry[i].dest_addr));
                         if (mn < 0) {
                             perror("sendto failed");
@@ -308,8 +316,9 @@ void* receiver_thread(void *arg) {
                         // }
                         // printf("\n");
                         pthread_mutex_unlock(&g_sm->sm_entry[i].lock);
-                        
+                        // pthread_mutex_lock(&g_sm->lock_sm);
                         // g_sm->r_ack[i] = next_val_required;
+                        // pthread_mutex_unlock(&g_sm->lock_sm);
                     }
                 
                     else{    // HANDLE ACK MESSAGES
