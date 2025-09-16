@@ -17,34 +17,6 @@
 #include <sys/shm.h>
 #include <pthread.h>
 
-Node* get_node(void *base, int offset) {
-    if (offset == -1) return NULL;
-    return (Node*)((char*)base + offset);
-}
-
-Node *alloc_node_in_shm(MTP_SM *g_sm) {
-    // Example: allocate from a preallocated pool in shared memory
-    for (int i = 0; i < MAX_SOCKETS; i++) {
-        if (!g_sm->node_pool[i].used) {
-            g_sm->node_pool[i].used = 1;
-            return &g_sm->node_pool[i].node;
-        }
-    }
-    return NULL; // pool exhausted
-}
-
-void free_node_in_shm(MTP_SM *g_sm, Node *node) {
-    if (!node) return;
-
-    for (int i = 0; i < MAX_NODES; i++) {
-        if (&g_sm->node_pool[i].node == node) {
-            g_sm->node_pool[i].used = 0;
-            return;
-        }
-    }
-}
-
-
 MTP_SM* finder(int shmid){
     shmid = shmget(SHM_KEY, sizeof(MTP_SM), 0777);
 
@@ -57,25 +29,12 @@ MTP_SM* finder(int shmid){
     return g_sm;
 }
 
-void* base_finder(int shmid) {
-    shmid = shmget(SHM_KEY, sizeof(MTP_SM), 0777);
-    void *base = shmat(shmid, NULL, 0);
-    if (base == (void *)-1) {
-        perror("shmat failed");
-        return NULL;
-    }
-    return base;
-}
-
 int m_socket(int domain, int type, int protocol){
-    
     if (type != SOCK_MTP) {
         errno = EPROTONOSUPPORT;
         return -1;
     }
-    
     MTP_SM* sm = finder(SHM_KEY);
-    // pthread_mutex_lock(&sm->lock_sm);
     if(sm->count_occupied < MAX_SOCKETS){
         pthread_mutex_lock(&sm->lock_sm);
         sm->count_occupied++;
@@ -117,11 +76,9 @@ int m_socket(int domain, int type, int protocol){
 
             pthread_mutex_unlock(&sm->sm_entry[i].lock);
         }
-        // pthread_mutex_unlock(&sm->lock_sm);
     }
     else{
         errno = ENOBUFS;
-        // pthread_mutex_unlock(&sm->lock_sm);
         return -1;
     }
     return 0;
@@ -129,7 +86,6 @@ int m_socket(int domain, int type, int protocol){
 
 int m_bind(int sockfd, struct sockaddr *src_addr, struct sockaddr *dest_addr, int addrlen){
     MTP_SM* sm = finder(SHM_KEY);
-    // pthread_mutex_lock(&sm.lock_sm);
     for(int i=0; i<MAX_SOCKETS; i++){
         pthread_mutex_lock(&sm->sm_entry[i].lock);
         if(sm->sm_entry[i].sock.udp_sockfd == sockfd){
@@ -154,24 +110,29 @@ int m_bind(int sockfd, struct sockaddr *src_addr, struct sockaddr *dest_addr, in
         }
         pthread_mutex_unlock(&sm->sm_entry[i].lock);
     }
-    // pthread_mutex_unlock(&sm.lock_sm);
     errno = EBADF;
     return -1;
 }
 
 int m_sendto(int sockfd, const void *msg, int len, unsigned int flags, const struct sockaddr *to, socklen_t tolen){
     MTP_SM* sm = finder(SHM_KEY);
-    // pthread_mutex_lock(&sm.lock_sm);
     for(int i=0; i<MAX_SOCKETS; i++){
         pthread_mutex_lock(&sm->sm_entry[i].lock);
         if(memcmp(&sm->sm_entry[i].dest_addr, to, sizeof(struct sockaddr)) == 0){
-            if (is_full(i, 0)) {
+            if (count_buffer(i, 0) == SENDER_BUFFER) {
+                printf("Sender buffer full\n");
                 errno = ENOBUFS;
                 pthread_mutex_unlock(&sm->sm_entry[i].lock);
                 return -1;
             }
-
-            int rv = enqueue_recv(i, *(MTP_Message *)msg, 0);
+            int rv = -1;
+            for(int k=0; k<SENDER_BUFFER; k++){
+                if(sm->sm_entry[i].sender.buffer[k].seq_num == -1){
+                    rv = 1;
+                    sm->sm_entry[i].sender.buffer[k] = *(MTP_Message *)msg;
+                    break;
+                }
+            }
             if (rv < 0) {
                 errno = ENOBUFS;
                 pthread_mutex_unlock(&sm->sm_entry[i].lock);
@@ -191,31 +152,62 @@ int m_recvfrom(int sockfd, void *buf, int len, unsigned int flags, struct sockad
     MTP_SM* sm = finder(SHM_KEY);
     // pthread_mutex_lock(&sm.lock_sm);
     for(int i=0;i<MAX_SOCKETS; i++){
-        pthread_mutex_lock(&sm->sm_entry[i].lock);
+        // pthread_mutex_lock(&sm->sm_entry[i].lock);
         if(memcmp(&sm->sm_entry[i].dest_addr, from, sizeof(struct sockaddr_in)) == 0){
-            if (is_empty(i, 1)) {
+            if (count_buffer(i, 1) == 0) {
                 errno = ENOMSG;
-                pthread_mutex_unlock(&sm->sm_entry[i].lock);
+                // pthread_mutex_unlock(&sm->sm_entry[i].lock);
                 return -1;
             }
-            if((sm->sm_entry[i].receiver.buffer.front - sm->r_ack[i] + MAX_SEQ_NUM)%MAX_SEQ_NUM < RECV_SWND){
-                printf("Buffer is not good\n");
-                pthread_mutex_unlock(&sm->sm_entry[i].lock);
+            if(sm->sm_entry[i].receiver.buffer[0].seq_num == -1){
+                errno = ENOMSG;
+                // pthread_mutex_unlock(&sm->sm_entry[i].lock);
                 return -1;
             }
-            int rv = dequeue_recv(i, (MTP_Message *)buf, 1);   // buf now stores the message
-            printf("size and index %d %d\n", sm->sm_entry[i].receiver.buffer.count, i);
+            int rv = -1;
+            if(sm->sm_entry[i].receiver.buffer[0].seq_num != sm->r_ack[i]){
+                return rv;   
+            }
+            printf("RECEIVER BUFFER BEFORE REMOVAL: ");
+            for(int k=0;k<RECV_BUFFER;k++){
+                printf("%d ", sm->sm_entry[i].receiver.buffer[k].seq_num);
+            }
+            printf("\n");
+            *(MTP_Message *) buf = sm->sm_entry[i].receiver.buffer[0];
+            for(int k=0; k<RECV_BUFFER; k++){
+                if(sm->sm_entry[i].receiver.buffer[k].seq_num != -1 ){
+                    rv = 1;
+                    *(MTP_Message *)buf = sm->sm_entry[i].receiver.buffer[k];
+                    sm->sm_entry[i].receiver.buffer[k].seq_num = -1; // Mark as dequeued
+                    sm->sm_entry[i].receiver.whether_taken[k] = 0;
+                    break;
+                }
+            }
+            
+            for(int k=1; k<RECV_BUFFER; k++){
+                sm->sm_entry[i].receiver.buffer[k-1] = sm->sm_entry[i].receiver.buffer[k];
+            }
+            
+            sm->sm_entry[i].receiver.buffer[RECV_BUFFER-1].seq_num = -1;
+            sm->r_ack[i]++;
+            sm->r_ack[i] %= MAX_SEQ_NUM;
+
+            printf("\nRECEIVER BUFFER AFTER REMOVAL: ");
+            for (int k = 0; k < RECV_BUFFER; k++) {
+                printf("%d ", sm->sm_entry[i].receiver.buffer[k].seq_num);
+            }
+            printf("\n");
+            printf("ACK NOW: %d\n", sm->r_ack[i]);
             if (rv < 0) {
                 errno = ENOBUFS;
-                pthread_mutex_unlock(&sm->sm_entry[i].lock);
+                // pthread_mutex_unlock(&sm->sm_entry[i].lock);
                 return -1;
             }
-            pthread_mutex_unlock(&sm->sm_entry[i].lock);
+            // pthread_mutex_unlock(&sm->sm_entry[i].lock);
             return rv;
         }
-        pthread_mutex_unlock(&sm->sm_entry[i].lock);
+        // pthread_mutex_unlock(&sm->sm_entry[i].lock);
     }
-    // pthread_mutex_unlock(&sm.lock_sm);
     errno = ENOTBOUND;  // HAVE SOME DOUBT HERE, SEE LATER
     return -1;
 }
@@ -223,23 +215,21 @@ int m_recvfrom(int sockfd, void *buf, int len, unsigned int flags, struct sockad
 int m_close(int sockfd) {
     MTP_SM* sm = finder(SHM_KEY);
     int i;
-    // pthread_mutex_lock(&sm.lock_sm);
     for (i = 0; i < MAX_SOCKETS; i++) {
         pthread_mutex_lock(&sm->sm_entry[i].lock);
         if (!sm->sm_entry[i].free_slot && sm->sm_entry[i].sock.udp_sockfd == sockfd) {
+            pthread_mutex_unlock(&sm->sm_entry[i].lock);
             break;
         }
         pthread_mutex_unlock(&sm->sm_entry[i].lock);
     }
     if (i == MAX_SOCKETS) {
         errno = EBADF; // invalid socket fd
-        // pthread_mutex_unlock(&sm.lock_sm);
         return -1;
     }
     if (close(sm->sm_entry[i].sock.udp_sockfd) < 0) {
         perror("close failed");
         pthread_mutex_unlock(&sm->sm_entry[i].lock);
-        // pthread_mutex_unlock(&sm.lock_sm);
         return -1;
     }
     sm->sm_entry[i].sock = (MTP_socket){0};
@@ -248,15 +238,22 @@ int m_close(int sockfd) {
     sm->sm_entry[i].pid_creation = -1;
     sm->sm_entry[i].src_addr = (struct sockaddr_in){0};
     sm->sm_entry[i].dest_addr = (struct sockaddr_in){0};
-    init_recv_queue(i, 0);
+    memset(sm->sm_entry[i].sender.buffer, 0, sizeof(sm->sm_entry[i].sender.buffer));
+    for(int k=0;k<SENDER_BUFFER;k++){
+        sm->sm_entry[i].sender.buffer[k].seq_num = -1;
+    }
     sm->sm_entry[i].sender.swnd_count = 0;
     memset(sm->sm_entry[i].sender.swnd, 0, sizeof(sm->sm_entry[i].sender.swnd));
-    init_recv_queue(i, 1);
+    memset(sm->sm_entry[i].receiver.buffer, 0, sizeof(sm->sm_entry[i].receiver.buffer));
+    for(int k=0;k<RECV_BUFFER;k++){
+        sm->sm_entry[i].receiver.buffer[k].seq_num = -1;
+    }
+    sm->sm_entry[i].receiver.buffer->seq_num = -1;
     sm->sm_entry[i].receiver.rwnd_count = 0;
     sm->sm_entry[i].receiver.next_val = 1;
+    memset(sm->sm_entry[i].receiver.whether_taken, 0, sizeof(sm->sm_entry[i].receiver.whether_taken));
     sm->sm_entry[i].to_bind = 0;
     pthread_mutex_unlock(&sm->sm_entry[i].lock);
-    // pthread_mutex_unlock(&sm->lock_sm);
     return 0;
 }
 
@@ -266,277 +263,6 @@ int dropMessage(float p){
         return 1; // Message dropped
     else
         return 0; // Message not dropped
-}
-
-// void init_recv_queue(int socket_id, int flag) {
-//     MTP_SM *g_sm = finder(SHM_KEY);
-//     if (g_sm == NULL) {
-//         perror("Failed to find shared memory");
-//         return;
-//     }
-//     MTP_Queue *q;
-//     if(flag==1)
-//         q = &g_sm->sm_entry[socket_id].receiver.buffer;
-//     else
-//         q = &g_sm->sm_entry[socket_id].sender.buffer;
-//     q->front = NULL;
-//     q->rear = NULL;
-//     q->count = 0;
-// }
-
-void init_recv_queue(int socket_id, int flag) {
-    MTP_SM *g_sm = finder(SHM_KEY);
-    if (g_sm == NULL) {
-        perror("Failed to find shared memory");
-        return;
-    }
-
-    MTP_Queue *q;
-    if (flag == 1)
-        q = &g_sm->sm_entry[socket_id].receiver.buffer;
-    else
-        q = &g_sm->sm_entry[socket_id].sender.buffer;
-
-    // Store offsets instead of pointers
-    q->front = 0;   // NULL offset
-    q->rear  = 0;   // NULL offset
-    q->count = 0;
-}
-
-void print_queue(int socket_id, int flag) {
-    MTP_SM *g_sm = finder(SHM_KEY);
-    if (g_sm == NULL) {
-        perror("Failed to find shared memory");
-        return;
-    }
-    MTP_Queue *q;
-    if(flag==1)
-        q = &g_sm->sm_entry[socket_id].receiver.buffer;
-    else
-        q = &g_sm->sm_entry[socket_id].sender.buffer;
-
-    printf("Queue contents (count=%d): ", q->count);
-    Node *current = (Node*)PTR(g_sm, q->front);
-    while (current != NULL) {
-        printf("[SeqNum: %d] -> ", current->msg.seq_num);
-        current = (Node*)PTR(g_sm, current->next);
-    }
-    printf("NULL\n");
-}
-// int enqueue_recv(int socket_id, MTP_Message msg, int flag) {
-//     MTP_SM *g_sm = finder(SHM_KEY);
-//     printf("%p ajfa;lksfjlkafjslfj\n", (void *)g_sm);
-//     if (g_sm == NULL) {
-//         perror("Failed to find shared memory");
-//         return -1;
-//     }
-//     MTP_Queue *q;
-//     if(flag==1)
-//         q = &g_sm->sm_entry[socket_id].receiver.buffer;
-//     else
-//         q = &g_sm->sm_entry[socket_id].sender.buffer;
-//     // printf("%p from enqueue_recv\n", (void *)q);
-//     Node *new_node = (Node*)malloc(sizeof(Node));
-//     if (!new_node) return -1;  // malloc failed
-//     if (is_full(socket_id, flag)) {
-//         free(new_node);
-//         return -1;  // queue is full
-//     }
-
-//     new_node->msg = msg;   // copy message
-    
-//     new_node->next = NULL;
-
-//     if (q->rear == NULL) {
-//         // empty queue
-//         q->front = new_node;
-//         q->rear = new_node;
-//     } else {
-//         q->rear->next = new_node;
-//         q->rear = new_node;
-//     }
-
-//     q->count++;
-//     return 0;  // success
-// }
-
-int enqueue_recv(int socket_id, MTP_Message msg, int flag) {
-    MTP_SM *g_sm = finder(SHM_KEY);
-    if (g_sm == NULL) {
-        perror("Failed to find shared memory");
-        return -1;
-    }
-
-    MTP_Queue *q;
-    if (flag == 1)
-        q = &g_sm->sm_entry[socket_id].receiver.buffer;
-    else
-        q = &g_sm->sm_entry[socket_id].sender.buffer;
-
-    if (is_full(socket_id, flag)) {
-        return -1;  // queue is full
-    }
-
-    // Allocate node INSIDE shared memory instead of malloc
-    Node *new_node = alloc_node_in_shm(g_sm);  // custom allocator
-    if (!new_node) return -1;
-
-    new_node->msg = msg;
-    new_node->next = 0;  // NULL offset
-
-    size_t new_off = OFFSET(g_sm, new_node);
-
-    if (q->rear == 0) {
-        // empty queue
-        q->front = new_off;
-        q->rear = new_off;
-    } else {
-        Node *rear_node = (Node*)PTR(g_sm, q->rear);
-        rear_node->next = new_off;
-        q->rear = new_off;
-    }
-
-    q->count++;
-    return 0;  // success
-}
-
-
-// int dequeue_recv(int socket_id, MTP_Message *msg, int flag) {
-//     MTP_SM *g_sm = finder(SHM_KEY);
-//     printf("%p \n", (void *)g_sm);
-//     if (g_sm == NULL) {
-//         perror("Failed to find shared memory");
-//         return -1;
-//     }
-//     MTP_Queue *q;
-//     if(flag==1)
-//         q = &g_sm->sm_entry[socket_id].receiver.buffer;
-//     else
-//         q = &g_sm->sm_entry[socket_id].sender.buffer;
-//     printf("%p from enqueue_recv\n", (void *)q);
-//     printf("Dequeuing message from receiver buffer\n");
-//     if (q->front == NULL) {
-//         // Queue is empty
-//         return -1;
-//     }
-
-//     Node *temp = q->front;
-//     *msg = temp->msg;   // copy message to caller
-
-//     q->front = q->front->next;
-//     if (q->front == NULL) {
-//         // Queue became empty
-//         q->rear = NULL;
-//     }
-
-//     free(temp);
-//     q->count--;
-//     return 0;  // success
-// }
-
-int dequeue_recv(int socket_id, MTP_Message *msg, int flag) {
-    MTP_SM *g_sm = finder(SHM_KEY);
-    if (g_sm == NULL) {
-        perror("Failed to find shared memory");
-        return -1;
-    }
-
-    MTP_Queue *q;
-    if (flag == 1)
-        q = &g_sm->sm_entry[socket_id].receiver.buffer;
-    else
-        q = &g_sm->sm_entry[socket_id].sender.buffer;
-
-    if (q->front == 0) {
-        // Queue is empty (0 means NULL offset)
-        return -1;
-    }
-
-    // Get front node
-    Node *front_node = (Node*)PTR(g_sm, q->front);
-
-    // Copy message out
-    *msg = front_node->msg;
-
-    // Move front forward
-    q->front = front_node->next;
-
-    if (q->front == 0) {
-        // Queue became empty
-        q->rear = 0;
-    }
-
-    // Free node (return it to SHM allocator pool)
-    free_node_in_shm(g_sm, front_node);
-
-    q->count--;
-    return 0;  // success
-}
-
-// int is_empty(int socket_id, int flag) {
-//     MTP_SM *g_sm = finder(SHM_KEY);
-//     if (g_sm == NULL) {
-//         perror("Failed to find shared memory");
-//         return -1;
-//     }
-//     MTP_Queue *q;
-//     if(flag==1)
-//         q = &g_sm->sm_entry[socket_id].receiver.buffer;
-//     else
-//         q = &g_sm->sm_entry[socket_id].sender.buffer;
-//     return q->count == 0;
-// }
-
-int is_empty(int socket_id, int flag) {
-    MTP_SM *g_sm = finder(SHM_KEY);
-    if (g_sm == NULL) {
-        perror("Failed to find shared memory");
-        return -1;
-    }
-
-    MTP_Queue *q;
-    if (flag == 1)
-        q = &g_sm->sm_entry[socket_id].receiver.buffer;
-    else
-        q = &g_sm->sm_entry[socket_id].sender.buffer;
-
-    // Trust count, but double check front offset
-    return (q->count == 0 || q->front == 0);
-}
-
-// int is_full(int socket_id, int flag) {
-//     MTP_SM *g_sm = finder(SHM_KEY);
-//     if (g_sm == NULL) {
-//         perror("Failed to find shared memory");
-//         return -1;
-//     }
-//     MTP_Queue *q;
-//     if(flag==1)
-//         q = &g_sm->sm_entry[socket_id].receiver.buffer;
-//     else
-//         q = &g_sm->sm_entry[socket_id].sender.buffer;
-//     return q->count == RECV_BUFFER;
-// }
-int is_full(int socket_id, int flag) {
-    MTP_SM *g_sm = finder(SHM_KEY);
-    if (g_sm == NULL) {
-        perror("Failed to find shared memory");
-        return -1;
-    }
-
-    MTP_Queue *q;
-    if (flag == 1)
-        q = &g_sm->sm_entry[socket_id].receiver.buffer;
-    else
-        q = &g_sm->sm_entry[socket_id].sender.buffer;
-
-    if (flag == 1){
-        if(q->count >= RECV_BUFFER) return 1;
-    }
-    else{
-        if(q->count >= SENDER_BUFFER) return 1;
-    }
-    return 0;
 }
 
 
@@ -567,26 +293,47 @@ void* file_to_sender_thread(void* arg) {
         fclose(file);
         return NULL;
     }
+    printf("SENDER SOCKET IS %d\n", j_);
     while(true){
-        while (fgets(line, sizeof(line), file)) {
+        sleep(1);
+        int rv=0;
+        MTP_Message msg;
+        while (rv<0 || fgets(line, sizeof(line), file)) {
+            printf("hello ---- 1\n");
             pthread_mutex_lock(&g_sm->sm_entry[j_].lock);
-            MTP_Message msg = {0};
-            strncpy(msg.data, line, sizeof(msg.data) - 1);
-            msg.data[sizeof(msg.data) - 1] = '\0';
-            msg.seq_num = i; // CHANGE THIS
-            msg.is_ack = false; // Not an ACK
-            msg.wnd_sz= -1;
-            msg.next_val = -1;
+            printf("hello ---- 2\n");
+            if(rv>=0){
+                msg = (MTP_Message){0};
+                strncpy(msg.data, line, sizeof(msg.data) - 1);
+                msg.data[sizeof(msg.data) - 1] = '\0';
+                msg.seq_num = i; // CHANGE THIS
+                printf("%d \n", msg.seq_num);
+                msg.is_ack = false; // Not an ACK
+                msg.wnd_sz= -1;
+                msg.next_val = -1;
+            }
             pthread_mutex_unlock(&g_sm->sm_entry[j_].lock);
-            int rv = m_sendto(sockfd, (const void *)&msg, sizeof(msg), 0, (const struct sockaddr *)&g_sm->sm_entry[j_].dest_addr, sizeof(g_sm->sm_entry[j_].dest_addr));
+            rv = m_sendto(sockfd, (const void *)&msg, sizeof(msg), 0, (const struct sockaddr *)&g_sm->sm_entry[j_].dest_addr, sizeof(g_sm->sm_entry[j_].dest_addr));
+            
+            if(rv>=0){
+                char filename[64] = "sender_buffer.txt";
+                FILE *file = fopen(filename, "a");
+                if (!file) {
+                    perror("Failed to open file for writing");
+                    return NULL; 
+                }
+                fprintf(file, "%s\n", msg.data);
+                fclose(file);
+            }
             if (rv < 0) {
                 perror("Failed to send_to message");
                 sleep(2);
                 continue;
             }
+            printf("Sent message first 10 letters: %.10s with SEQ NUM: %d\n", msg.data, msg.seq_num);
             i = (i+1)%MAX_SEQ_NUM;
+            // sleep(3);
         }
-        sleep(3);
     }
     fclose(file);
     return NULL;
@@ -612,25 +359,72 @@ void* receiver_to_file_thread(void* arg) {
     }
         
     while(true){
+        // sleep(40);
+        sleep(5);
         pthread_mutex_lock(&g_sm->sm_entry[j_].lock);
         MTP_Message buf;
         int addrlen = sizeof(g_sm->sm_entry[j_].dest_addr);
-        pthread_mutex_unlock(&g_sm->sm_entry[j_].lock);
-        while (true) {
-            int rv = m_recvfrom(sockfd, (void *)&buf, sizeof(buf), 0, (struct sockaddr *)&g_sm->sm_entry[j_].dest_addr, &addrlen);
-            if (rv < 0) {
-                perror("Failed to receive message");
-                sleep(T/3);
-                continue;
+        for(int j=0; j<RECV_BUFFER; j++){
+            printf("%d ", g_sm->sm_entry[j_].receiver.buffer[j].seq_num);
+        }
+        printf("\n");
+        printf("\n");
+        printf("R_ACK NOW: %d\n", g_sm->r_ack[j_]);
+        printf("\n");
+        if(g_sm->sm_entry[j_].receiver.buffer[0].seq_num == g_sm->r_ack[j_]){
+            for(int j=0; j<RECV_BUFFER; j++){
+
+                int rv = m_recvfrom(sockfd, (void *)&buf, sizeof(buf), 0, (struct sockaddr *)&g_sm->sm_entry[j_].dest_addr, &addrlen);
+                // printf("hello i am here now\n");
+                for(int jj=0; jj<RECV_BUFFER; jj++){
+                    printf("%d ", g_sm->sm_entry[j_].receiver.buffer[jj].seq_num);
+                }
+                if (rv < 0) {
+                    perror("Failed to receive message");
+                    break;
+                }
+                fprintf(file, "%s\n", buf.data);
+                printf("Successfully wrote to file %d\n", buf.seq_num);
+                fflush(file);
             }
-            fprintf(file, "%s\n", buf.data);
-            printf("Successfully wrote to file\n");
-            fflush(file);
-            // sleep(40);
         }
         pthread_mutex_unlock(&g_sm->sm_entry[j_].lock);
-        sleep(3);
+        // sleep(T);
     }
     fclose(file);
     return NULL;
+}
+
+int count_buffer(int socket_id, int flag){
+    MTP_SM *g_sm = finder(SHM_KEY);
+    if (g_sm == NULL) {
+        perror("Failed to find shared memory");
+        return -1;
+    }
+    int cnt=0;
+    if(flag==1){
+        for(int k=0;k<RECV_BUFFER;k++){
+            if(g_sm->sm_entry[socket_id].receiver.buffer[k].seq_num != -1) cnt++;
+        }
+    }
+    else{
+        for(int k=0;k<SENDER_BUFFER;k++){
+            if(g_sm->sm_entry[socket_id].sender.buffer[k].seq_num != -1) cnt++;
+        }
+    }
+
+    return cnt;
+
+}
+
+void order(MTP_Message arr[], int n) {
+    int idx = 0; 
+    for (int i = 0; i < n; i++) {
+        if (arr[i].seq_num != -1) {
+            arr[idx++] = arr[i];
+        }
+    }
+    while (idx < n) {
+        arr[idx++] = (MTP_Message){-1};
+    }
 }

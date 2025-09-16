@@ -18,11 +18,11 @@
 #define RECV_SWND 5             // receiver sliding window size
 #define SOCK_MTP 12345          // MTP socket type
 #define T 5                     // Timeout duration in seconds
-#define DROP_PROB 0.5           // Packet drop probability
+#define DROP_PROB 0.2           // Packet drop probability
 #define TIME_SEC 5              // Timeout duration in seconds
 #define TIME_USEC 0             // Timeout duration in microseconds
 #define MAX_NODES 1024
-#define SHM_KEY 0x2428           // Shared memory key for inter-process communication
+#define SHM_KEY 0x2433           // Shared memory key for inter-process communication
 
 #define ENOBUFS 105  // No buffer space available error code
 #define ENOTBOUND 106 // Socket is not bound error code
@@ -35,12 +35,13 @@
 #define OFFSET(base, ptr)   ((ptr) ? (size_t)((char*)(ptr) - (char*)(base)) : 0)
 #define PTR(base, offset)   ((offset) ? (void*)((char*)(base) + (offset)) : NULL)
 
+// struct timespec default_time = {0};
 
 // ------------------- Message / ACK Formats -------------------
 
 
 typedef struct {
-    uint16_t seq_num;               // 4-bit (wraps around after 15)
+    int seq_num;               // 4-bit (wraps around after 15)
     uint16_t wnd_sz;
     bool is_ack;                     // true if this is an ACK
     int next_val;
@@ -92,13 +93,14 @@ typedef struct {
 } MTP_Queue;
 
 typedef struct {
-    MTP_Queue buffer;   
+    MTP_Message buffer[RECV_BUFFER];  
     int next_val;
-    int rwnd_count;                
+    int rwnd_count; 
+    int whether_taken[RECV_BUFFER];
 } MTP_Receiver;
 
 typedef struct {
-    MTP_Queue buffer;  
+    MTP_Message buffer[SENDER_BUFFER];  
     MTP_Message swnd[SENDER_SWND];
     int swnd_count;                 
 } MTP_Sender;
@@ -131,6 +133,7 @@ typedef struct{
 } MTP_SM;
 
 // ------------------- API Functions -------------------
+
 MTP_SM* finder(int shmid);
 int m_socket(int domain, int type, int protocol);
 int m_bind(int sockfd, struct sockaddr *src_addr, struct sockaddr *dest_addr, int addrlen);
@@ -138,21 +141,20 @@ int m_sendto(int sockfd, const void *msg, int len, unsigned int flags, const str
 int m_recvfrom(int sockfd, void *buf, int len, unsigned int flags, struct sockaddr *from, int *fromlen);
 int m_close(int sockfd);
 int dropMessage(float p);
-void init_recv_queue(int socket_id, int flag);
-int enqueue_recv(int socket_id, MTP_Message msg, int flag);
-int dequeue_recv(int socket_id, MTP_Message *msg, int flag);
-int is_empty(int socket_id, int flag);
-int is_full(int socket_id, int flag);
 void* file_to_sender_thread(void* arg);
 void* receiver_to_file_thread(void* arg);
 int is_empty_buffer(int socket_id, int flag);
 int is_full_buffer(int socket_id, int flag);
+int count_buffer(int socket_id, int flag);
 int get_buffer_size(int socket_id, int flag);
 int remove_from_buffer(int socket_id, MTP_Message *msg, int flag);
 int add_to_buffer(int socket_id, MTP_Message *msg, int flag);
 Node* get_node(void *base, int offset);
 void* base_finder(int shmid);
 void print_queue(int socket_id, int flag);
+void initializer_message(MTP_Message* msg, bool is_ack);
+void order(MTP_Message arr[], int n);
+
 // void initQueue_pid(PIDQueue *q);
 // int is_Empty_pid(PIDQueue *q);
 // void enqueue_pid(PIDQueue *q, pid_t pid, char* filename);
